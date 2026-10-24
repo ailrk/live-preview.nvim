@@ -1,22 +1,22 @@
---------------------------------------------------------------------------
--- sha1.lua
---
--- Stripped-down SHA-1 implementation, adapted from HashLib
--- (originally by Egor Skriptunoff, ported to Roblox by boatbomber,
--- optimized by howmanysmall).
---
--- USAGE (from an nvim Lua config or plugin):
---     local sha1 = require("sha1")
---     local digest = sha1.sha1("hello world")   -- returns 40-char lowercase hex string
---
---     -- streaming/chunked usage:
---     local update = sha1.sha1()
---     update("hello ")
---     update("world")
---     local digest = update()
---
--- Only requires the LuaJIT `bit` library, which ships with Neovim.
-------------------------------------------------------------------------
+------------------------------------------------------------
+--- sha1.lua
+---
+--- Stripped-down SHA-1 implementation, adapted from HashLib
+--- (originally by Egor Skriptunoff, ported to Roblox by boatbomber,
+--- optimized by howmanysmall).
+---
+--- USAGE (from an nvim Lua config or plugin):
+---     local sha1 = require("sha1")
+---     local digest = sha1.sha1("hello world")   -- returns 40-char lowercase hex string
+---
+---     -- streaming/chunked usage:
+---     local update = sha1.sha1()
+---     update("hello ")
+---     update("world")
+---     local digest = update()
+---
+--- Only requires the LuaJIT `bit` library, which ships with Neovim.
+------------------------------------------------------------
 
 local bit = require("bit")
 
@@ -28,9 +28,9 @@ local rol    = bit.rol
 local ror    = bit.ror
 local bnot   = bit.bnot
 
--- LuaJIT's bit ops operate on 32-bit signed integers and wrap around
--- automatically, so we don't need the "% 4294967296" masking that the
--- original Roblox (bit32, unsigned 0..2^32-1) version required.
+--- LuaJIT's bit ops operate on 32-bit signed integers and wrap around
+--- automatically, so we don't need the "% 4294967296" masking that the
+--- original Roblox (bit32, unsigned 0..2^32-1) version required.
 
 local sha1_H = { 0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0 }
 

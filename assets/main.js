@@ -31,16 +31,38 @@ const SUN_SVG = '<circle cx="12" cy="12" r="5" stroke="currentColor" stroke-widt
 const COPY_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><rect x="9" y="9" width="13" height="13" rx="2" stroke="currentColor" stroke-width="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" stroke="currentColor" stroke-width="2"/></svg>';
 const CHECK_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M20 6 9 17l-5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
+/* ----- Cursor styles (injected so no style.css change is needed) ----- */
+(function injectCursorStyle() {
+    const st = document.createElement('style');
+    st.id = 'cursor-style';
+    st.textContent = `
+#cursor {
+  position: absolute;
+  width: 2px;
+  background: var(--accent, #3b82f6);
+  pointer-events: none;
+  z-index: 50;
+  display: none;
+  border-radius: 1px;
+  animation: cursor-blink 1.06s steps(1) infinite;
+}
+#cursor.block { opacity: .45; animation: none; }
+@keyframes cursor-blink { 50% { opacity: 0; } }
+`;
+    document.head.appendChild(st);
+})();
+
 /* ----- State ----- */
 let lastContent = null;
 let currentTheme = document.documentElement.dataset.theme || 'dark';
 let mermaidIdCounter = 0;
 let wsConnected = false;
 let sock = null;
+let srcLines = [];
 const loadedPacks = new Set();
 
 // Live-reload auth token. Either substituted into the document by
-// markdown-preview.nvim at file-write time, or passed via ?t=<token>
+// live-preview.nvim at file-write time, or passed via ?t=<token>
 // in the URL on first load (then stashed in sessionStorage so it
 // survives refreshes). Empty string when the server has no auth.
 const LIVE_TOKEN = (() => {
@@ -129,7 +151,7 @@ themeBtn.addEventListener('click', () => {
 
 /* ----- Markdown-it setup ----- */
 if (!window.markdownit) {
-    console.error('[markdown-preview] markdown-it not loaded from CDN');
+    console.error('[live-preview] markdown-it not loaded from CDN');
     showContent();
     contentEl.innerHTML = '<p style="color:var(--err-fg)">Failed to load markdown-it from CDN. Check your internet connection.</p>';
 }
@@ -217,11 +239,13 @@ if (window.texmath && window.katex) {
     });
 }
 
-// Line number injection for scroll sync (à la peek.nvim / iamcco)
+// Line number injection for cursor sync. Records the full source range.
 function injectLineNumbers(tokens, idx, options, env, slf) {
-    if (tokens[idx].map) {
-        tokens[idx].attrJoin('class', 'source-line');
-        tokens[idx].attrSet('data-source-line', String(tokens[idx].map[0]));
+    const t = tokens[idx];
+    if (t.map) {
+        t.attrJoin('class', 'source-line');
+        t.attrSet('data-source-line', String(t.map[0]));
+        t.attrSet('data-source-end', String(t.map[1]));
     }
     return slf.renderToken(tokens, idx, options, env, slf);
 }
@@ -229,6 +253,7 @@ md.renderer.rules.paragraph_open = injectLineNumbers;
 md.renderer.rules.heading_open = injectLineNumbers;
 md.renderer.rules.list_item_open = injectLineNumbers;
 md.renderer.rules.table_open = injectLineNumbers;
+md.renderer.rules.tr_open = injectLineNumbers;
 md.renderer.rules.blockquote_open = injectLineNumbers;
 
 // Override fence renderer to handle mermaid specially
@@ -236,7 +261,9 @@ const defaultFence = md.renderer.rules.fence;
 md.renderer.rules.fence = function (tokens, idx, options, env, self) {
     const token = tokens[idx];
     const info = token.info ? token.info.trim().toLowerCase() : '';
-    const lineAttr = token.map ? ` data-source-line="${token.map[0]}"` : '';
+    const lineAttr = token.map
+        ? ` data-source-line="${token.map[0]}" data-source-end="${token.map[1]}"`
+        : '';
     if (info === 'mermaid') {
         const encoded = encodeURIComponent(token.content);
         const stableId = 'mmd-' + idx;
@@ -253,7 +280,7 @@ md.renderer.rules.fence = function (tokens, idx, options, env, self) {
     } else {
         html = self.renderToken(tokens, idx, options);
     }
-    if (lineAttr) html = html.replace(/^<pre\b/, `<pre${lineAttr}`);
+    if (lineAttr) html = html.replace(/^<pre\b/, `<pre${lineAttr} data-kind="code"`);
     // Wrap in a non-scrolling container so the language badge and the
     // copy button stay pinned while the <pre> scrolls horizontally.
     // Emitted here rather than in a DOM pass so morphdom's virtual
@@ -385,7 +412,7 @@ async function fetchContent() {
     try {
         const resp = await fetch(withToken('content.md?ts=' + Date.now()), { cache: 'no-store' });
         if (!resp.ok) {
-            console.warn('[markdown-preview] content.md fetch failed:', resp.status);
+            console.warn('[live-preview] content.md fetch failed:', resp.status);
             if (resp.status === 401) {
                 // Stale token (server restarted since this tab loaded).
                 // Evict it so the next load bootstraps fresh.
@@ -395,7 +422,7 @@ async function fetchContent() {
         }
         return (await resp.text()).replace(/\r\n?/g, '\n');
     } catch (e) {
-        console.warn('[markdown-preview] content.md fetch error:', e);
+        console.warn('[live-preview] content.md fetch error:', e);
         return null;
     }
 }
@@ -409,6 +436,7 @@ async function sync(initial = false) {
     }
     if (!initial && text === lastContent) return;
     lastContent = text;
+    srcLines = text.split('\n');
 
     try {
         capturedFrontMatter = null;
@@ -437,6 +465,10 @@ async function sync(initial = false) {
                 onBeforeElUpdated: function (fromEl, toEl) {
                     if (fromEl.classList && fromEl.classList.contains('mermaid-rendered') &&
                         fromEl.dataset.mermaidSource === toEl.dataset.mermaidSource) {
+                        // Keep the rendered SVG, but refresh the source range
+                        // so cursor sync stays correct after edits above it.
+                        if (toEl.dataset.sourceLine != null) fromEl.dataset.sourceLine = toEl.dataset.sourceLine;
+                        if (toEl.dataset.sourceEnd != null) fromEl.dataset.sourceEnd = toEl.dataset.sourceEnd;
                         return false;
                     }
                     if (fromEl.tagName === 'DETAILS' && fromEl.hasAttribute('open')) {
@@ -458,9 +490,11 @@ async function sync(initial = false) {
 
         attachCopyButtons();
 
+        if (lastScrollData) placeCursor(lastScrollData, { scroll: false });
+
         setStatus('Updated ' + nowTime());
     } catch (e) {
-        console.error('[markdown-preview] render error:', e);
+        console.error('[live-preview] render error:', e);
         contentEl.innerHTML = '<pre style="white-space:pre-wrap;padding:1rem">' +
             text.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</pre>';
         setStatus('Render error: ' + e.message);
@@ -468,70 +502,230 @@ async function sync(initial = false) {
 }
 
 
-/* ----- Scroll sync (line-based interpolation) ----- */
-function getElementOffset(el) {
-    let current = el;
-    let top = 0;
-    while (top === 0 && current) {
-        top = current.getBoundingClientRect().top;
-        current = current.parentElement;
-    }
-    return top + window.scrollY;
+/* ----- Precise cursor sync ----- */
+const utf8enc = new TextEncoder(), utf8dec = new TextDecoder();
+
+// nvim sends a byte column; JS strings are UTF-16.
+function byteColToUtf16(text, byteCol) {
+    const bytes = utf8enc.encode(text);
+    return utf8dec.decode(bytes.subarray(0, Math.min(byteCol, bytes.length))).length;
 }
 
-function scrollToSourceLine(line, total) {
+// How many *rendered* characters does s[0..end) produce? Skips markdown syntax.
+function visibleLen(s, end = s.length, blockMarkers = true) {
+    let i = blockMarkers
+        ? s.match(/^\s*(?:(?:>\s?)+|#{1,6}\s+|(?:[-*+]|\d{1,9}[.)])\s+(?:\[[ xX]\]\s+)?)*/)[0].length
+        : s.length - s.trimStart().length;
+    let n = 0;
+    if (end <= i) return 0;
+    while (i < end) {
+        const c = s[i];
+        if (c === '\\' && /[!-\/:-@\[-`{-~]/.test(s[i + 1] || '')) {
+            if (i + 1 < end) n++;
+            i += 2; continue;
+        }
+        if (c === '`' || c === '*' || c === '~') { i++; continue; }
+        if (c === '_') {
+            if (/\w/.test(s[i - 1] || '') && /\w/.test(s[i + 1] || '')) n++;
+            i++; continue;
+        }
+        if (c === '[' || (c === '!' && s[i + 1] === '[')) { i++; continue; }
+        if (c === ']') {
+            if (s[i + 1] === '(') { const j = s.indexOf(')', i); i = j < 0 ? s.length : j + 1; }
+            else if (s[i + 1] === '[') { const j = s.indexOf(']', i + 2); i = j < 0 ? s.length : j + 1; }
+            else i++;
+            continue;
+        }
+        if (c === '<') {
+            const m = s.slice(i).match(/^<\/?[A-Za-z][^>]*>/);
+            if (m) { i += m[0].length; continue; }
+        }
+        if (c === '&') {
+            const m = s.slice(i).match(/^&(?:#\d+|#x[0-9a-f]+|\w+);/i);
+            if (m) { if (i + m[0].length <= end) n++; i += m[0].length; continue; }
+        }
+        n++; i++;
+    }
+    return n;
+}
+
+// Text nodes that belong to `el` itself (not to nested blocks).
+function textNodesOf(el) {
+    const root = el.tagName === 'PRE' ? (el.querySelector('code') || el) : el;
+    const skip = new Set(['UL', 'OL', 'TABLE', 'BLOCKQUOTE']);
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+        acceptNode(n) {
+            for (let p = n.parentElement; p && p !== root; p = p.parentElement) {
+                if (p.hasAttribute('data-source-line') || skip.has(p.tagName) ||
+                    p.classList.contains('katex-mathml')) return NodeFilter.FILTER_REJECT;
+            }
+            return NodeFilter.FILTER_ACCEPT;
+        }
+    });
+    const out = [];
+    while (walker.nextNode()) out.push(walker.currentNode);
+    return out;
+}
+
+// Client-space caret rect at a character offset across a list of text nodes.
+function caretRectAt(nodes, offset, wantWidth) {
+    if (!nodes.length) return null;
+    let acc = 0, node = null, o = 0;
+    for (const n of nodes) {
+        const len = n.nodeValue.length;
+        if (offset <= acc + len) { node = n; o = offset - acc; break; }
+        acc += len;
+    }
+    if (!node) { node = nodes[nodes.length - 1]; o = node.nodeValue.length; }
+
+    const r = document.createRange();
+    const rectOf = (a, b) => {
+        r.setStart(node, a); r.setEnd(node, b);
+        const rs = r.getClientRects();
+        return rs.length ? rs : null;
+    };
+    const len = node.nodeValue.length;
+    let x = null, y, h, w = 0;
+
+    const caret = rectOf(o, o);
+    if (caret) { const c = caret[0]; x = c.left; y = c.top; h = c.height; }
+    else if (o > 0 && rectOf(o - 1, o)) { const rs = rectOf(o - 1, o); const c = rs[rs.length - 1]; x = c.right; y = c.top; h = c.height; }
+    else if (o < len && rectOf(o, o + 1)) { const c = rectOf(o, o + 1)[0]; x = c.left; y = c.top; h = c.height; }
+    if (x == null) return null;
+
+    if (wantWidth && o < len) {
+        const rs = rectOf(o, o + 1);
+        if (rs && rs[0].width > 0 && Math.abs(rs[0].top - y) < 2) w = rs[0].width;
+    }
+    return { x, y, h, w };
+}
+
+// Table row: pick the cell by pipe position.
+function rowTarget(tr, s, col) {
+    const pipes = [];
+    for (let i = 0; i < s.length; i++) if (s[i] === '|' && s[i - 1] !== '\\') pipes.push(i);
+    const segs = [];
+    let prev = -1;
+    for (const p of pipes) { segs.push([prev + 1, p]); prev = p; }
+    segs.push([prev + 1, s.length]);
+    if (pipes.length && s.slice(0, pipes[0]).trim() === '') segs.shift();
+    if (s.trimEnd().endsWith('|')) segs.pop();
+    let idx = segs.findIndex(sg => col <= sg[1]);
+    if (idx < 0) idx = segs.length - 1;
+    idx = Math.max(0, Math.min(idx, tr.children.length - 1));
+    const [a, b] = segs[idx] || [0, s.length];
+    const raw = s.slice(a, b);
+    const lead = raw.length - raw.trimStart().length;
+    const within = raw.trimStart();
+    return {
+        cell: tr.children[idx],
+        offset: visibleLen(within, Math.max(0, Math.min(within.length, col - a - lead)), false),
+    };
+}
+
+// (line, utf16 col) -> client-space rect, or null
+function locateCursor(line, col, wantWidth) {
+    let hit = null;
+    for (const el of contentEl.querySelectorAll('[data-source-line]')) {
+        const s = +el.dataset.sourceLine, e = +el.dataset.sourceEnd;
+        if (s <= line && line < e) hit = el;
+        else if (s > line) break;
+    }
+    if (!hit) return null;
+    const s = +hit.dataset.sourceLine, e = +hit.dataset.sourceEnd;
+    const box = () => { const b = hit.getBoundingClientRect(); return { x: b.left, y: b.top, h: 18, w: 0 }; };
+
+    if (hit.classList.contains('mermaid-block')) return box();
+    if (hit.tagName === 'TABLE') {
+        const tr = hit.querySelector('tr');
+        if (!tr) return box();
+        const b = tr.getBoundingClientRect();
+        return { x: b.left, y: b.top, h: b.height, w: 0 };
+    }
+
+    let nodes, offset;
+    const cur = srcLines[line] ?? '';
+
+    if (hit.tagName === 'TR') {
+        const t = rowTarget(hit, cur, col);
+        if (!t.cell) return box();
+        nodes = textNodesOf(t.cell); offset = t.offset;
+    } else if (hit.dataset.kind === 'code') {
+        nodes = textNodesOf(hit);
+        const closing = e - 1 > s && /^\s*(`{3,}|~{3,})\s*$/.test(srcLines[e - 1] || '');
+        const total = nodes.reduce((a, n) => a + n.nodeValue.length, 0);
+        if (line <= s) offset = 0;
+        else if (closing && line >= e - 1) offset = total;
+        else {
+            const indent = (srcLines[s].match(/^\s*/) || [''])[0].length;
+            const strip = (l) => Math.min(indent, (srcLines[l].match(/^\s*/) || [''])[0].length);
+            offset = 0;
+            for (let l = s + 1; l < line; l++) offset += srcLines[l].length - strip(l) + 1;
+            offset += Math.max(0, col - strip(line));
+        }
+    } else {
+        nodes = textNodesOf(hit);
+        offset = 0;
+        for (let l = s; l < line; l++) offset += visibleLen((srcLines[l] || '').trimEnd()) + 1;
+        offset += visibleLen(cur, col);
+    }
+
+    return caretRectAt(nodes, offset, wantWidth) || box();
+}
+
+// Old interpolation, kept only for lines that aren't in any block (blank lines etc.)
+function interpolatedTop(line, total) {
     const elements = contentEl.querySelectorAll('[data-source-line]');
-    if (!elements.length) return;
-
-    // Edge: first or last line
-    if (line <= 0) { window.scrollTo({ top: 0 }); return; }
-    if (line >= total - 1) { window.scrollTo({ top: document.documentElement.scrollHeight }); return; }
-
-    // Find element at/before cursor line and the one after
+    if (!elements.length || line <= 0) return 0;
+    if (line >= total - 1) return document.documentElement.scrollHeight;
+    const top = (el) => el.getBoundingClientRect().top + window.scrollY;
     let prev = null, next = null;
     for (const el of elements) {
-        const elLine = Number(el.dataset.sourceLine);
-        if (elLine <= line) {
-            prev = { el, line: elLine };
-        } else {
-            next = { el, line: elLine };
-            break;
-        }
+        const l = Number(el.dataset.sourceLine);
+        if (l <= line) prev = { el, line: l }; else { next = { el, line: l }; break; }
     }
-
-    if (!prev) { window.scrollTo({ top: 0 }); return; }
-
-    const prevTop = getElementOffset(prev.el);
-    let offsetTop;
-
-    if (next) {
-        const nextTop = getElementOffset(next.el);
-        const ratio = (line - prev.line) / (next.line - prev.line);
-        offsetTop = prevTop + (nextTop - prevTop) * ratio;
-    } else {
-        // Last element — extrapolate using its height
-        const h = prev.el.getBoundingClientRect().height;
-        const linesLeft = Math.max(1, total - prev.line);
-        offsetTop = prevTop + (line - prev.line) * (h / linesLeft);
-    }
-
-    // Center the target line in the viewport
-    window.scrollTo({ top: Math.max(0, offsetTop - window.innerHeight / 2) });
-    drawCursorOverlay(20, offsetTop, 16);
+    if (!prev) return 0;
+    const pt = top(prev.el);
+    if (next) return pt + (top(next.el) - pt) * ((line - prev.line) / (next.line - prev.line));
+    return pt;
 }
 
-
-function drawCursorOverlay(x, y, height) {
-    let cursorEl = document.getElementById('cursor');
-    if (!cursorEl) {
-        cursorEl = document.createElement('div');
-        cursorEl.id = 'cursor';
-        document.body.appendChild(cursorEl);
+function drawCursor(x, y, h, w, block) {
+    let el = document.getElementById('cursor');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'cursor';
+        document.body.appendChild(el);
     }
-    cursorEl.style.left = `${x}px`;
-    cursorEl.style.top = `${y}px`;
-    cursorEl.style.height = `${height}px`;
-    cursorEl.style.display = 'block';
+    el.classList.toggle('block', !!block);
+    el.style.left = `${x}px`;
+    el.style.top = `${y}px`;
+    el.style.height = `${h}px`;
+    el.style.width = block && w ? `${w}px` : '2px';
+    el.style.display = 'block';
+}
+
+function placeCursor(data, { scroll = true } = {}) {
+    const line = data.line;
+    if (data.text != null) srcLines[line] = data.text;   // fresher than last rendered content
+    const col = byteColToUtf16(srcLines[line] ?? '', data.col || 0);
+    const block = !!data.mode && !/^[iRc]/.test(data.mode);
+
+    let pos = null;
+    try {
+        pos = locateCursor(line, col, block);
+    } catch (e) {
+        console.warn('[live-preview] locateCursor failed:', e);
+    }
+    let px, py, h = 18, w = 0;
+    if (pos) {
+        px = pos.x + window.scrollX; py = pos.y + window.scrollY; h = pos.h; w = pos.w;
+    } else {
+        px = contentEl.getBoundingClientRect().left + window.scrollX;
+        py = interpolatedTop(line, data.total || 1);
+    }
+    drawCursor(px, py, h, w, block);
+    if (scroll) window.scrollTo({ top: Math.max(0, py - window.innerHeight / 2) });
 }
 
 
@@ -543,13 +737,12 @@ function connectWS() {
     sock = new WebSocket(wsUrl);
 
     sock.addEventListener('open', () => {
-        console.log('[markdown-preview] WebSocket connected');
+        console.log('[live-preview] WebSocket connected');
         wsConnected = true;
         setConnectionState('connected');
     });
 
     sock.addEventListener('message', async (event) => {
-        console.log('[markdown-preview] websocket message arrived')
         try {
             const data = JSON.parse(event.data);
             switch (data.type) {
@@ -557,32 +750,27 @@ function connectWS() {
                     await sync(false);
                     break;
                 case "cursor":
-                    if (scrollSyncPaused) return;
-                    try {
-                        const data = JSON.parse(event.data);
-                        console.log(data)
-                        if (data.line == null) return;
-                        lastScrollData = data;
-                        scrollToSourceLine(data.line, data.total || 1);
-                    } catch (_) {}
+                    if (data.line == null) return;
+                    lastScrollData = data;
+                    placeCursor(data, { scroll: !scrollSyncPaused });
                     break;
                 default:
                     break;
             }
-
         } catch (err) {
-            console.log('[markdown-preview] WebSocket error: ', err);
+            console.log('[live-preview] WebSocket error: ', err);
         }
     });
 
     sock.addEventListener('close', () => {
+        wsConnected = false;
         setConnectionState('error');
-        console.log('[markdown-preview] WebSocket disconnected. Reconnecting in 2s...');
+        console.log('[live-preview] WebSocket disconnected. Reconnecting in 2s...');
         setTimeout(connectWS, 2000); // Auto-reconnect safety net
     });
 
     sock.addEventListener('error', () => {
-        console.log('[markdown-preview] websocket error')
+        console.log('[live-preview] websocket error')
         setConnectionState('error');
     });
 }
@@ -728,11 +916,9 @@ contentEl.addEventListener('click', (e) => {
 });
 
 
-// Re-apply scroll when layout shifts (images loading, etc.)
+// Re-place the cursor when layout shifts (images loading, window resize, etc.)
 new ResizeObserver(() => {
-    if (lastScrollData && !scrollSyncPaused) {
-        scrollToSourceLine(lastScrollData.line, lastScrollData.total || 1);
-    }
+    if (lastScrollData) placeCursor(lastScrollData, { scroll: !scrollSyncPaused });
 }).observe(contentEl);
 
 
@@ -753,10 +939,9 @@ window.addEventListener('resize', applyBottomPadding);
         applyTheme(currentTheme);
         await sync(true);
     } catch (e) {
-        console.error('[markdown-preview] boot error:', e);
+        console.error('[live-preview] boot error:', e);
         showContent();
         contentEl.innerHTML = '<p style="color:var(--err-fg)">Error: ' + (e.message || e) + '</p>';
     }
     connectWS();
 })();
-

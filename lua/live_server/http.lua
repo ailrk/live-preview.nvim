@@ -1,3 +1,15 @@
+------------------------------------------------------------
+--- live_server/http.lua
+---
+--- A very simple http library.
+---
+--- `write_headers` simply streaming the header through tcp socket.
+--- `send_response` construct a complete http response
+--- `parse_request` parse a http request into a table
+---
+--- All headers are converted into lower case.
+------------------------------------------------------------
+
 local util = require("live_server.util")
 
 local M = {}

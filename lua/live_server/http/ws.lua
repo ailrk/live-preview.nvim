@@ -1,3 +1,8 @@
+------------------------------------------------------------
+--- live_server/http/ws.lua
+---
+--- Websocket implementation.
+------------------------------------------------------------
 local http = require("live_server.http")
 local sha1 = require("live_server.sha1")
 local bit = require("bit")
@@ -5,6 +10,7 @@ local M = {}
 
 
 local WEBSOCKET_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
 
 -- Computes the WebSocket accept key from the client challenge key
 ---@type fun(key: string): string
@@ -20,7 +26,8 @@ local function compute_ws_accept(key)
 end
 
 
--- Frames a text payload string into a WebSocket text frame (unmasked)
+--- Frames a text payload string into a WebSocket text frame (unmasked)
+--- @type fun(payload: string): string
 local function frame_text(payload)
     local len = #payload
     local header = string.char(0x81) -- Fin bit set + Opcode 1 (Text)
@@ -35,6 +42,10 @@ local function frame_text(payload)
     else
         header = header .. string.char(127)
         -- Write 64-bit length (big-endian)
+        -- Luajist bit library works on 32 bit signed integer, if we have
+        -- message larger than 2^31 (2GB) this will overflow.
+        -- In practice we probably never have any message larger than 2GB, but
+        -- it's important to note here.
         for i = 7, 0, -1 do
             header = header .. string.char(bit.band(bit.rshift(len, i * 8), 0xFF))
         end
@@ -44,6 +55,7 @@ end
 
 
 -- Minimal parser to extract text frames sent from browser client
+--- @type fun(chunk: string): string?
 local function unframe_text(chunk)
     if #chunk < 2 then return nil end
     local byte2 = string.byte(chunk, 2)
@@ -72,10 +84,10 @@ local function unframe_text(chunk)
 end
 
 
+--- Finish a websocket handshake and start the connection
 ---@type fun(inst: ServerInstance, sock: uv.uv_tcp_t, req_headers: table)
 function M.accept(inst, sock, req_headers)
     print(vim.inspect("WS accept"))
-    print(vim.inspect(req_headers))
     -- Look for the client handshake challenge token
     local ws_key = req_headers["sec-websocket-key"]
     if not ws_key then
@@ -99,12 +111,14 @@ function M.accept(inst, sock, req_headers)
         h["access-control-allow-origin"] = cors
     end
 
-    http.write_headers(sock, 101, h) -- Switch protocols to WebSocket
+    -- Switch protocols to WebSocket
+    http.write_headers(sock, 101, h)
     table.insert(inst.clients, sock)
 
+    -- Start listening for ws message.
     sock:read_start(function(err, chunk)
+        -- Connection teardown cleanup loop
         if err or not chunk then
-            -- Connection teardown cleanup loop
             for i, cl in ipairs(inst.clients) do
                 if cl == sock then
                     table.remove(inst.clients, i)
@@ -124,24 +138,35 @@ function M.accept(inst, sock, req_headers)
 end
 
 
----@type fun(inst: ServerInstance, type: string, data: table)
-function M.broadcast(inst, type, data)
-    print("WS broadcast")
-    -- Enforce unified structured json framework across layout channels
-    data.type = type
+
+--- Teardown a client
+--- @type fun(inst: ServerInstance, sock: uv.uv_tcp_t)
+local function teardown(inst, sock)
+    for i, cl in ipairs(inst.clients) do
+        if cl == sock then
+            table.remove(inst.clients, i)
+            break
+        end
+    end
+    pcall(function() sock:close() end)
+end
+
+
+--- Send a message to a websocket client
+--- @type fun(inst: ServerInstance, sock: uv.uv_tcp_t, msg: table)
+function M.send(inst, sock, data)
     local json_payload = vim.json.encode(data)
     local frame = frame_text(json_payload)
+    sock:write(frame, function(err) if err then teardown(inst, sock) end end)
+end
 
-    local i = 1
-    while i <= #inst.clients do
-        local cl = inst.clients[i]
-        local ok = pcall(function() cl:write(frame) end)
-        if not ok then
-            pcall(function() cl:close() end)
-            table.remove(inst.clients, i)
-        else
-            i = i + 1
-        end
+
+--- Broadcast message to all clients
+--- @type fun(inst: ServerInstance, data: table)
+function M.broadcast(inst, data)
+    print("WS broadcast")
+    for i = 1, #inst.clients do
+        M.send(inst, inst.clients[i], data)
     end
 end
 

@@ -258,19 +258,17 @@ header h1 {
 /* ── Cursor ────────────────────────────────────────────────────── */
 
 #cursor {
-    position: absolute;
-    width: 2px;
-    background-color: var(--accent, #007acc);
-    pointer-events: none;
-    z-index: 9;
-    animation: blink 1s step-end infinite;
-    transition: top 0.05s linear, left 0.05s linear;
+  position: absolute;          /* page coordinates */
+  width: 2px;
+  background: var(--accent);
+  pointer-events: none;
+  z-index: 50;
+  display: none;
+  border-radius: 1px;
+  animation: cursor-blink 1.06s steps(1) infinite;
 }
-
-@keyframes blink {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0; }
-}
+#cursor.block { opacity: .45; animation: none; }
+@keyframes cursor-blink { 50% { opacity: 0; } }
 
 
 /* ── Markdown content ──────────────────────────────────────────── */

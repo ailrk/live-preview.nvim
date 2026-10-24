@@ -1,14 +1,19 @@
 -- lua/live_preview/init.lua
 local ts = require("live_preview.ts")
 local util = require("live_preview.util")
+local ls_ws = require("live_server.http.ws")
 local ls_server = require("live_server.server")
 local ls_util = require("live_server.util")
 local M = {}
 
 
+
 M.config = {
-	port = 0, -- 0 = auto; effective port depends on instance_mode
-	host = "127.0.0.1", -- bind address; "0.0.0.0" for network access (e.g. over SSH)
+    -- 0 = auto; effective port depends on instance_mode
+	port = 0,
+
+    -- bind address; "0.0.0.0" for network access (e.g. over SSH)
+	host = "127.0.0.1",
 	open_browser = true,
 
 	-- nil = system default browser. String for app/binary name (e.g. "Firefox",
@@ -45,7 +50,7 @@ M.config = {
 	-- Enables %%{init: {"layout": "elk"}}%% in diagrams.
 	mermaid_elk = false,
 
-	scroll_sync = true, -- sync browser scroll to cursor position
+	scroll_sync = true, -- sync browser scroll + cursor to the nvim cursor
 
 	-- "dark" or "light"; determines the initial theme of the preview page
 	default_theme = "light",
@@ -61,7 +66,7 @@ M.config = {
 	yaml_mode = "panel",
 
 	-- Fraction (0–1): vertical position of the final line when scrolled to end.
-	-- 0.5 = middle of viewport (default), 1.0 = bottom edge (no extra space)
+	--- 0.5 = middle of viewport (default), 1.0 = bottom edge (no extra space)
 	bottom_padding = 0.5,
 
 	hooks = {
@@ -89,7 +94,7 @@ M._debounce_seq = 0
 M._workspace_dir = nil
 M._mmdr_available = nil -- nil = unchecked, true/false after probe
 
----@type integer[]
+---@type {line:integer, col:integer, mode:string, text:string}|nil
 M._last_cursor = nil
 
 M._is_primary = nil      -- true/false/nil (takeover mode)
@@ -161,18 +166,10 @@ local function write_index(dir)
 	-- Bake the token only on loopback binds: on a network bind the index is
 	-- served to any peer that can reach the port, and a baked token would
 	-- defeat the auth entirely (the browser gets it via ?t= instead).
-	content = content:gsub('data%-live%-token="__LIVE_TOKEN__"', function()
-		return 'data-live-token="' .. (host_is_loopback() and M._token or "") .. '"'
-	end)
+	content = content:gsub('data%-live%-token="__LIVE_TOKEN__"', function() return 'data-live-token="' .. (host_is_loopback() and M._token or "") .. '"' end)
 	content = content:gsub("__THEME__", function() return M.config.default_theme end)
-	content = content:gsub("__ALLOW_HTML__", function()
-		return M.config.allow_raw_html ~= false and "true" or "false"
-	end)
-	content = content:gsub("__YAML_MODE__", function()
-		local m = M.config.yaml_mode
-		if m ~= "hide" and m ~= "raw" then m = "panel" end
-		return m
-	end)
+	content = content:gsub("__ALLOW_HTML__", function() return M.config.allow_raw_html ~= false and "true" or "false" end)
+	content = content:gsub("__YAML_MODE__", function() local m = M.config.yaml_mode if m ~= "hide" and m ~= "raw" then m = "panel" end return m end)
 
 	-- Inline custom CSS after the bundled styles so user rules win the cascade.
 	if M.config.custom_css and M.config.custom_css ~= "" then
@@ -190,6 +187,7 @@ local function write_index(dir)
 	util.write_text(dst, content)
 	return dst
 end
+
 
 local function write_index_if_needed(dir)
 	if M.config.overwrite_index_on_start then
@@ -257,6 +255,7 @@ local function is_mmdr_available()
 	return M._mmdr_available
 end
 
+
 ---Render a single mermaid diagram source via mmdr CLI.
 ---@param source string Raw mermaid diagram text
 ---@return string|nil svg SVG string on success
@@ -269,13 +268,23 @@ local function render_mermaid_via_mmdr(source)
 	return result, nil
 end
 
+
 -- Expand button SVG used in pre-rendered blocks (matches browser-side fence renderer)
 local EXPAND_BTN_SVG = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none">'
 	.. '<path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>'
 	.. "</svg>"
 
+
+local function count_newlines(s)
+	local _, n = s:gsub("\n", "")
+	return n
+end
+
+
 ---Pre-render ```mermaid fences via mmdr, replacing them with HTML blocks.
 ---Failed renders leave the original fence untouched for browser-side fallback.
+---The replacement keeps the SAME number of lines as the original fence, so
+---line numbers in content.md still match the nvim buffer (cursor sync).
 ---@param text string Full markdown text
 ---@return string text Markdown with pre-rendered mermaid blocks
 local function prerender_mermaid_blocks(text)
@@ -315,6 +324,11 @@ local function prerender_mermaid_blocks(text)
 				local block_id = "mmd-rust-" .. rust_idx
 				local encoded = vim.uri_encode(source, "rfc2396")
 
+				-- Collapse newlines inside the SVG: a multi-line (or blank-line
+				-- containing) SVG would both end the HTML block early and
+				-- change the line count.
+				svg = svg:gsub("\r?\n", " ")
+
 				local html_block = '<div class="mermaid-block mermaid-rendered" id="'
 					.. block_id
 					.. '" data-mermaid-source="'
@@ -330,9 +344,14 @@ local function prerender_mermaid_blocks(text)
 					.. "</div>"
 					.. "</div>"
 
+				-- Preserve line count: replacement is "\n" .. block .. "\n" (2 newlines),
+				-- so pad with however many newlines the original segment had beyond that.
+				local original = text:sub(fence_start, close_end)
+				local pad = math.max(0, count_newlines(original) - 2)
+
 				-- Append text before fence + the HTML block
 				out[#out + 1] = text:sub(pos, fence_start - 1)
-				out[#out + 1] = "\n" .. html_block .. "\n"
+				out[#out + 1] = "\n" .. html_block .. "\n" .. string.rep("\n", pad)
 				pos = close_end + 1
 			else
 				-- mmdr failed for this block — leave fence untouched for JS fallback
@@ -454,6 +473,7 @@ local function maybe_refresh(bufnr, silent)
 	return true
 end
 
+
 local function debounced_refresh(bufnr)
 	M._debounce_seq = M._debounce_seq + 1
 	local this_call = M._debounce_seq
@@ -467,49 +487,67 @@ end
 
 
 ---------------------------------------------------------------------------
--- Scroll sync (line-based)
+-- Cursor sync
 ---------------------------------------------------------------------------
 
+-- Line offset between the nvim buffer and content.md.
+-- markdown: 0. .mmd/.mermaid: content.md gets a "```mermaid" line prepended.
+-- anything else: content.md holds only an extracted block, so no mapping.
+local function content_line_offset(bufnr)
+	if vim.bo[bufnr].filetype == "markdown" then return 0 end
+	local name = vim.api.nvim_buf_get_name(bufnr)
+	if name:match("%.mmd$") or name:match("%.mermaid$") then return 1 end
+	return nil
+end
 
---- Send cursor line to browser for scroll sync.
-local function send_scroll_sync(bufnr)
+
+---@param bufnr integer
+---@param force boolean|nil  send even if nothing changed (e.g. on start / browser hello)
+local function send_cursor_sync(bufnr, force)
 	if not M.config.scroll_sync then return end
-	local cursor_line = vim.api.nvim_win_get_cursor(0)[1] -- 1-based
-	if cursor_line == M._last_cursor_line then return end
-	M._last_cursor_line = cursor_line
-	local total = vim.api.nvim_buf_line_count(bufnr)
-	local payload = vim.json.encode({ line = cursor_line - 1, total = total })
+	if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then return end
+	if vim.api.nvim_get_current_buf() ~= bufnr then return end
+
+	local offset = content_line_offset(bufnr)
+	if not offset then return end
+
+	local pos = vim.api.nvim_win_get_cursor(0)
+	local mode = vim.api.nvim_get_mode().mode
+	local text = vim.api.nvim_get_current_line()
+
+	local last = M._last_cursor
+	if not force and last
+		and last.line == pos[1] and last.col == pos[2]
+		and last.mode == mode and last.text == text then
+		return
+	end
+	M._last_cursor = { line = pos[1], col = pos[2], mode = mode, text = text }
+
 	if M._server_instance then
-		pcall(ls_server.send_event, M._server_instance, "scroll", payload)
-	elseif M._takeover_port then
-		require("live_preview.remote").send_event(M._takeover_port, "scroll", payload, M._token)
+		local ok, err = pcall(ls_ws.broadcast, M._server_instance, {
+			type = "cursor",
+			line = pos[1] - 1 + offset, -- 0-based line in content.md
+			col = pos[2],               -- 0-based BYTE column; JS converts to UTF-16
+			mode = mode,
+			text = text,                -- current line, so the cursor is right before the debounced reload
+			total = vim.api.nvim_buf_line_count(bufnr) + offset,
+		})
+		if not ok then
+			vim.notify("Markdown Preview: cursor broadcast failed: " .. tostring(err), vim.log.levels.ERROR)
+		end
 	end
 end
 
 
---- Send cursor position to browser for cursor sync.
-local function send_cursor_sync(bufnr)
-	if not M.config.scroll_sync then return end
-	local cursor_pos = vim.api.nvim_win_get_cursor(0)
-
-    if M._last_cursor == nil then
-	    M._last_cursor = cursor_pos
-    elseif cursor_pos[1] == M._last_cursor[1] and cursor_pos[2] == M._last_cursor[2] then
-        return
-    else
-	    M._last_cursor = cursor_pos
-    end
-
-	local total = vim.api.nvim_buf_line_count(bufnr)
-	local payload = vim.json.encode({
-        line = cursor_pos[1] - 1,
-        char = cursor_pos[2] - 1,
-        total = total })
-	if M._server_instance then
-		pcall(ls_server.send_event, M._server_instance, "cursor", payload)
-	elseif M._takeover_port then
-		require("live_preview.remote").send_event(M._takeover_port, "cursor", payload, M._token)
-	end
+-- Handle messages sent by the browser over the websocket.
+-- Runs in a libuv callback, so hop onto the main loop before touching nvim.
+local function on_browser_message(raw)
+	vim.schedule(function()
+		local ok, msg = pcall(vim.json.decode, raw)
+		if ok and type(msg) == "table" and msg.type == "hello" then
+			send_cursor_sync(M._active_bufnr, true)
+		end
+	end)
 end
 
 
@@ -541,10 +579,22 @@ local function set_autocmds_for_buffer(bufnr)
 			group = M._augroup,
 			buffer = bufnr,
 			callback = function() send_cursor_sync(bufnr) end,
-			desc = "Markdown Preview scroll sync",
+			desc = "Markdown Preview cursor sync",
 		})
 	end
+
+	-- Not buffer-local on purpose: ModeChanged's pattern is matched against
+	-- "old:new" modes, so buffer-local registration is unreliable. The
+	-- callback checks the buffer itself.
+	vim.api.nvim_create_autocmd("ModeChanged", {
+		group = M._augroup,
+		callback = function()
+			if vim.api.nvim_get_current_buf() == bufnr then send_cursor_sync(bufnr) end
+		end,
+		desc = "Markdown Preview cursor shape sync",
+	})
 end
+
 
 ---------------------------------------------------------------------------
 -- Public API
@@ -561,6 +611,7 @@ local function lan_ip()
 	return (addr and addr.ip) or "127.0.0.1"
 end
 
+
 -- Build the URL the browser opens to. Embeds the auth token when one exists
 -- so the first request includes it (the page then stashes it in
 -- sessionStorage for refreshes).
@@ -573,9 +624,11 @@ local function browser_url(port)
 	return base
 end
 
+
 function M.start()
 	local bufnr = vim.api.nvim_get_current_buf()
 	M._active_bufnr = bufnr
+	M._last_cursor = nil -- force the first cursor message after (re)start
 
 	-- Takeover coordination (lock probe + cross-instance events) talks to
 	-- 127.0.0.1, which a specific-interface bind does not answer on. Only
@@ -620,6 +673,14 @@ function M.start()
 			write_content(dir, text, bufnr)
 			M._last_text_by_buf[bufnr] = text
 			set_autocmds_for_buffer(bufnr)
+			if M.config.scroll_sync then
+				vim.notify(
+					"Markdown Preview: another Neovim instance owns the preview server on port "
+						.. tostring(lock_data.port)
+						.. ".\nContent updates work, but cursor sync is only available from that instance.",
+					vim.log.levels.WARN
+				)
+			end
 			if type(M.config.hooks.on_start) == "function" then
 				M.config.hooks.on_start(browser_url(lock_data.port))
 			end
@@ -688,7 +749,9 @@ function M.start()
 				inject_script = false,
 				debounce = 100,
 			},
-            on_message = function () end, -- TODO
+			-- The browser sends {type="hello"} when its websocket opens; reply
+			-- with the current cursor so a fresh/reconnected tab is in sync.
+			on_message = on_browser_message,
 			features = { dirlist = { enabled = false } },
 			token = M._token,
 			protected_paths = protected,
@@ -745,7 +808,12 @@ function M.start()
 			end, 200)
 		end
 	end
+
+	-- Push an initial cursor position. The browser may not have its websocket
+	-- open yet; the "hello" handshake (see on_browser_message) covers that case.
+	vim.defer_fn(function() send_cursor_sync(bufnr, true) end, 500)
 end
+
 
 function M.refresh()
 	local bufnr = vim.api.nvim_get_current_buf()
@@ -754,6 +822,7 @@ function M.refresh()
 		vim.notify("Markdown Preview: no changes detected", vim.log.levels.INFO)
 	end
 end
+
 
 function M.stop()
 	if M._augroup then
@@ -768,8 +837,7 @@ function M.stop()
 		require("live_preview.lock").remove()
 	end
 	M._workspace_dir = nil
-	M._last_cursor_line = nil
-	M._last_cursor_char = nil
+	M._last_cursor = nil
 	M._is_primary = nil
 	M._takeover_port = nil
 	M._token = nil

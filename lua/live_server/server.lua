@@ -2,8 +2,7 @@ local uv   = vim.loop
 local util = require("live_server.util")
 local http = require("live_server.http")
 local ws = require("live_server.http.ws")
-
-local S    = {}
+local S = {}
 
 
 ---@class ServerInstance
@@ -43,6 +42,7 @@ S.features = {
 }
 
 
+--- MIME type strings
 local MIME = {
     html = "text/html; charset=utf-8",
     htm = "text/html; charset=utf-8",
@@ -68,13 +68,20 @@ local function guess_mime(path)
 end
 
 
--- -------- Path mapping & file read ----------------------------------------
+------------------------------------------------------------
+-- Path mapping & file read
+------------------------------------------------------------
 
--- Canonicalize a request path so the auth gate and the file mapper can never
--- disagree. Strip the query, percent-decode, then lexically resolve '.'/'..'
--- and collapse duplicate slashes. Without this a peer could evade a
--- protected_paths pattern with an encoded or slash-padded variant that still
--- resolves to the protected file: //content.md, /content%2emd, /x/../content.md.
+--- Canonicalize a request path so the auth gate and the file mapper can never
+--- disagree. The following steps is performed:
+---
+--- 1. Strip the query, percent-decode
+--- 2. then lexically resolve '.'/'..'
+--- 3. collapse duplicate slashes.
+---
+--- Without this a peer could evade a protected_paths pattern with an encoded
+--- or slash-padded variant that still resolves to the protected file:
+--- //content.md, /content%2emd, /x/../content.md.
 ---@type fun(req_path: string): string
 local function normalize_path(req_path)
     local raw = req_path:match("^([^?#]*)") or req_path
@@ -91,9 +98,9 @@ local function normalize_path(req_path)
 end
 
 
--- Map an already-normalized path (see normalize_path) to a real file under
--- root. realpath containment stays as defense in depth against anything
--- normalization missed (symlinks, filesystem-level surprises).
+--- Map an already-normalized path (see normalize_path) to a real file under
+--- root. realpath containment stays as defense in depth against anything
+--- normalization missed (symlinks, filesystem-level surprises).
 ---@type fun(norm_path: string, root_real: string): string|uv.uv_fs_t?
 local function sanitize_and_map(norm_path, root_real)
     if norm_path == "/" then
@@ -122,9 +129,9 @@ local function read_file_all(abs_path)
 end
 
 
-------------------------------
+------------------------------------------------------------
 --- Reload
-------------------------------
+------------------------------------------------------------
 
 local function schedule_reload(inst, changed_path)
     if not inst.live_enabled then return end
@@ -235,7 +242,9 @@ local function start_fs_watch(inst)
     end
 end
 
--- -------- HTML helpers (injection + templating) ---------------------------
+------------------------------------------------------------
+-- HTML helpers (injection + templating)
+------------------------------------------------------------
 
 local function send_html_with_injection(inst, sock, html, extra_headers)
     if inst.inject_script then
@@ -257,7 +266,9 @@ local function serve_html_file_with_injection(inst, sock, abs_path, extra_header
     send_html_with_injection(inst, sock, body, extra_headers)
 end
 
--- -------- Directory listing -----------------------------------------------
+------------------------------------------------------------
+-- Directory listing
+------------------------------------------------------------
 
 local function dir_listing_html(inst, fs_path, req_path)
     local entries = {}
@@ -318,7 +329,10 @@ local function dir_listing_html(inst, fs_path, req_path)
     ]], util.html_escape(title), css, util.html_escape(title), table.concat(rows))
 end
 
--- -------- Static file streaming -------------------------------------------
+
+------------------------------------------------------------
+-- Static file streaming
+------------------------------------------------------------
 
 local function stream_file(sock, abs_path, extra_headers)
     local fd = uv.fs_open(abs_path, "r", 438)
@@ -365,7 +379,9 @@ local function serve_path(inst, sock, abs_path, req_path, extra_headers)
     end
 end
 
--- -------- Server ----------------------------------------------------------
+------------------------------------------------------------
+-- Server
+------------------------------------------------------------
 
 ---@type fun(inst: ServerInstance, sock: uv.uv_tcp_t): fun()
 local function on_request(inst, sock)
@@ -494,6 +510,7 @@ end
 ---@type fun(inst: ServerInstance, tcp: uv.uv_tcp_t)
 local function start_server(inst, tcp)
     print("[TODO] starting live server...")
+    print("STARTING!!")
     tcp:listen(128, function(err_listen)
         if err_listen then return end
 
@@ -508,7 +525,9 @@ local function start_server(inst, tcp)
 end
 
 
--- -------- Public server API -----------------------------------------------
+------------------------------------------------------------
+-- Public server API
+------------------------------------------------------------
 
 -- cfg: { port, root, default_index|nil, headers, live={enabled,inject_script,debounce}, features={dirlist={enabled,show_hidden}}, host, token, protected_paths, asset_root }
 function S.start(cfg)
@@ -614,19 +633,18 @@ end
 function S.reload(inst, reason_path)
     local rp = tostring(reason_path or "")
     local is_css = inst.css_inject and rp:match("%.css$")
-    local payload = ('{"ts":%d,"path":%q,"css":%s}'):format(os.time(), rp, is_css and "true" or "false")
-    sse.broadcast(inst, "reload", payload)
+    ws.broadcast(inst, {
+        type = "reload",
+        ts = (":%d"):format(os.time()),
+        path = rp,
+        css = is_css
+    })
     if inst.notify_on_reload then
         vim.schedule(function()
             util.notify(("Reload%s → %s"):format(is_css and " (CSS)" or "", rp ~= "" and rp or "manual"),
             { notify = true })
         end)
     end
-end
-
-
-function S.send_event(inst, event_type, data)
-    sse.broadcast(inst, event_type, data or "{}")
 end
 
 
