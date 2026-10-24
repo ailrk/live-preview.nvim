@@ -87,7 +87,6 @@ end
 --- Finish a websocket handshake and start the connection
 ---@type fun(inst: ServerInstance, sock: uv.uv_tcp_t, req_headers: table)
 function M.accept(inst, sock, req_headers)
-    print(vim.inspect("WS accept"))
     -- Look for the client handshake challenge token
     local ws_key = req_headers["sec-websocket-key"]
     if not ws_key then
@@ -113,6 +112,7 @@ function M.accept(inst, sock, req_headers)
 
     -- Switch protocols to WebSocket
     http.write_headers(sock, 101, h)
+    pcall(function() sock:nodelay(true) end) -- disable Nagle
     table.insert(inst.clients, sock)
 
     -- Start listening for ws message.
@@ -164,7 +164,6 @@ end
 --- Broadcast message to all clients
 --- @type fun(inst: ServerInstance, data: table)
 function M.broadcast(inst, data)
-    print("WS broadcast")
     for i = 1, #inst.clients do
         M.send(inst, inst.clients[i], data)
     end

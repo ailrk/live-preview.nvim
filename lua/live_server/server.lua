@@ -510,7 +510,6 @@ end
 ---@type fun(inst: ServerInstance, tcp: uv.uv_tcp_t)
 local function start_server(inst, tcp)
     print("[TODO] starting live server...")
-    print("STARTING!!")
     tcp:listen(128, function(err_listen)
         if err_listen then return end
 
