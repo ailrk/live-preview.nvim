@@ -31,27 +31,6 @@ const SUN_SVG = '<circle cx="12" cy="12" r="5" stroke="currentColor" stroke-widt
 const COPY_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><rect x="9" y="9" width="13" height="13" rx="2" stroke="currentColor" stroke-width="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" stroke="currentColor" stroke-width="2"/></svg>';
 const CHECK_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M20 6 9 17l-5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
-/* ----- Cursor styles (injected so no style.css change is needed) ----- */
-(function injectCursorStyle() {
-    const st = document.createElement('style');
-    st.id = 'cursor-style';
-    st.textContent = `
-#cursor {
-  position: absolute;
-  width: 2px;
-  background: var(--accent, #3b82f6);
-  pointer-events: none;
-  z-index: 50;
-  display: none;
-  border-radius: 1px;
-  animation: cursor-blink 1.06s steps(1) infinite;
-}
-#cursor.block { opacity: .45; animation: none; }
-@keyframes cursor-blink { 50% { opacity: 0; } }
-`;
-    document.head.appendChild(st);
-})();
-
 /* ----- State ----- */
 let lastContent = null;
 let currentTheme = document.documentElement.dataset.theme || 'dark';
