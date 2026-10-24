@@ -468,9 +468,10 @@ local function on_request(inst, sock)
             local aroot_real = uv.fs_realpath(aroot)
             if not aroot_real then return http.http_404(sock, "/__live/asset") end
             local ok_real, real = pcall(uv.fs_realpath, util.joinpath(aroot_real, rel))
-            if not ok_real or not real or not util.path_has_prefix(real, aroot_real) then
+            if not ok_real or not real then
                 return http.http_404(sock, "/__live/asset")
             end
+
             return stream_file(sock, real, inst.headers)
         end
 
