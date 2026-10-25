@@ -147,32 +147,6 @@ function U.pick_list(opts, cb)
 end
 
 
--- Directory scanner (simple, bounded depth)
-local function scan_dirs(root, maxdepth, limit)
-    maxdepth = maxdepth or 3
-    limit = limit or 500
-    local res, q = {}, { { root, 0 } }
-    while #q > 0 and #res < limit do
-        local item = table.remove(q, 1)
-        local dir, depth = item[1], item[2]
-        local it = uv.fs_scandir(dir)
-        if it then
-            while true do
-                local name, t = uv.fs_scandir_next(it)
-                if not name then break end
-                if t == "directory" and name:sub(1, 1) ~= "." then
-                    local full = U.joinpath(dir, name)
-                    table.insert(res, full)
-                    if depth < maxdepth then table.insert(q, { full, depth + 1 }) end
-                end
-            end
-        end
-    end
-    table.sort(res)
-    return res
-end
-
-
 -- .liveignore parser
 function U.parse_liveignore(root)
     local path = U.joinpath(root, ".liveignore")

@@ -10,7 +10,7 @@
 --- All headers are converted into lower case.
 ------------------------------------------------------------
 
-local util = require("live_server.util")
+local util = require("live_preview.server.util")
 
 local M = {}
 

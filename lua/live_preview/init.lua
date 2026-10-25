@@ -1,13 +1,13 @@
 -- lua/live_preview/init.lua
 local ts = require("live_preview.ts")
 local util = require("live_preview.util")
-local ls_ws = require("live_server.http.ws")
-local ls_server = require("live_server.server")
-local ls_util = require("live_server.util")
+local ls_ws = require("live_preview.server.http.ws")
+local ls_server = require("live_preview.server")
+local ls_util = require("live_preview.server.util")
 local M = {}
 
 M.config = {
-	-- bind address; "0.0.0.0" for network access (e.g. over SSH)
+	-- bind address; "0.0.0.0" for network access
 	host = "127.0.0.1",
 	open_browser = true,
 
@@ -35,7 +35,7 @@ M.config = {
 	-- Enables %%{init: {"layout": "elk"}}%% in diagrams.
 	mermaid_elk = false,
 
-	scroll_sync = true, -- sync browser scroll + cursor to the nvim cursor
+	cursor_sync = true, -- sync browser scroll + cursor to the nvim cursor
 
 	-- "dark" or "light"; determines the initial theme of the preview page
 	default_theme = "light",
@@ -327,7 +327,7 @@ end
 ---@param bufnr integer
 ---@param force boolean|nil  send even if nothing changed (e.g. on start / browser hello)
 local function send_cursor_sync(bufnr, force)
-	if not M.config.scroll_sync then return end
+	if not M.config.cursor_sync then return end
 	if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then return end
 	if vim.api.nvim_get_current_buf() ~= bufnr then return end
 
@@ -368,7 +368,7 @@ end
 ---Move the cursor in the previewed buffer to a position sent by the browser.
 ---@param msg table {line: number (0-based, content.md), col: number (0-based BYTE col)}
 local function goto_position(msg)
-	if not M.config.scroll_sync then return end
+	if not M.config.cursor_sync then return end
 
 	local bufnr = M._active_bufnr
 	if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then return end

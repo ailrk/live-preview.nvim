@@ -1,7 +1,7 @@
 local uv   = vim.loop
-local util = require("live_server.util")
-local http = require("live_server.http")
-local ws = require("live_server.http.ws")
+local util = require("live_preview.server.util")
+local http = require("live_preview.server.http")
+local ws = require("live_preview.server.http.ws")
 local S = {}
 
 
