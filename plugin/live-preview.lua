@@ -9,10 +9,6 @@ vim.api.nvim_create_user_command("LivePreview", function()
 	require("live_preview").start()
 end, {})
 
-vim.api.nvim_create_user_command("LivePreviewRefresh", function()
-	require("live_preview").refresh()
-end, {})
-
 vim.api.nvim_create_user_command("LivePreviewStop", function()
 	require("live_preview").stop()
 end, {})

@@ -33,7 +33,6 @@ M.config = {
 
 	overwrite_index_on_start = true,
 
-	auto_refresh = true,
 	auto_refresh_events = { "InsertLeave", "TextChanged", "TextChangedI", "BufWritePost" },
 	debounce_ms = 300,
 	notify_on_refresh = false,
@@ -552,18 +551,16 @@ local function set_autocmds_for_buffer(bufnr)
 	end
 	M._augroup = vim.api.nvim_create_augroup("MarkdownPreviewAuto", { clear = true })
 
-	if M.config.auto_refresh then
-		for _, ev in ipairs(M.config.auto_refresh_events) do
-			vim.api.nvim_create_autocmd(ev, {
-				group = M._augroup,
-				buffer = bufnr,
-				callback = function()
-					debounced_refresh(bufnr)
-				end,
-				desc = "Markdown Preview auto-refresh (debounced)",
-			})
-		end
-	end
+    for _, ev in ipairs(M.config.auto_refresh_events) do
+        vim.api.nvim_create_autocmd(ev, {
+            group = M._augroup,
+            buffer = bufnr,
+            callback = function()
+                debounced_refresh(bufnr)
+            end,
+            desc = "Markdown Preview auto-refresh (debounced)",
+        })
+    end
 
 	for _, ev in ipairs({ "CursorMoved", "CursorMovedI" }) do
 		vim.api.nvim_create_autocmd(ev, {
@@ -609,10 +606,9 @@ end
 local function browser_url(port)
 	local display_host = (M.config.host == "0.0.0.0") and lan_ip() or M.config.host
 	local base = ("http://%s:%d/"):format(display_host, port)
-	if M._token and M._token ~= "" then
-		return base .. "?t=" .. M._token
-	end
-	return base
+    local url = M._token and M._token ~= "" and base .. "?t=" .. M._token or base
+    vim.notify("[live-preview]: serving on " .. url)
+	return url
 end
 
 
