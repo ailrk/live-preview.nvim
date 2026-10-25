@@ -614,6 +614,23 @@ function rowTarget(tr, s, col) {
     };
 }
 
+// Interpolation, only for lines that aren't in any block (blank lines etc.)
+function interpolatedTop(line, total) {
+    const elements = contentEl.querySelectorAll('[data-source-line]');
+    if (!elements.length || line <= 0) return 0;
+    if (line >= total - 1) return document.documentElement.scrollHeight;
+    const top = (el) => el.getBoundingClientRect().top + window.scrollY;
+    let prev = null, next = null;
+    for (const el of elements) {
+        const l = Number(el.dataset.sourceLine);
+        if (l <= line) prev = { el, line: l }; else { next = { el, line: l }; break; }
+    }
+    if (!prev) return 0;
+    const pt = top(prev.el);
+    if (next) return pt + (top(next.el) - pt) * ((line - prev.line) / (next.line - prev.line));
+    return pt;
+}
+
 // (line, utf16 col) -> client-space rect, or null
 function locateCursor(line, col, wantWidth) {
     let hit = null;
@@ -694,6 +711,9 @@ function placeCursor(data, { scroll = true } = {}) {
     let px, py, h = 18, w = 0;
     if (pos) {
         px = pos.x + window.scrollX; py = pos.y + window.scrollY; h = pos.h; w = pos.w;
+    } else {
+        px = contentEl.getBoundingClientRect().left + window.scrollX;
+        py = interpolatedTop(line, data.total || 1); h = 0; w = 0;
     }
     drawCursor(px, py, h, w, block);
     if (scroll) window.scrollTo({ top: Math.max(0, py - window.innerHeight / 2) });
