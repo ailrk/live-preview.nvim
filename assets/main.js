@@ -842,6 +842,7 @@ function connectWS() {
         console.log('[live-preview] WebSocket connected');
         wsConnected = true;
         setConnectionState('connected');
+        sendToNvim({ type: 'hello' });
     });
 
     sock.addEventListener('message', async (event) => {
@@ -944,6 +945,7 @@ function applyBottomPadding() {
 
 (async function main() {
     try {
+        connectWS();
         // Apply theme
         themeBtn.addEventListener('click', () => {
             applyTheme(currentTheme === 'dark' ? 'light' : 'dark');
@@ -1088,6 +1090,5 @@ function applyBottomPadding() {
         showContent();
         contentEl.innerHTML = '<p style="color:var(--err-fg)">Error: ' + (e.message || e) + '</p>';
     }
-    connectWS();
 
 })();
