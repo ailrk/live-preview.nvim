@@ -8,6 +8,6 @@ More over, you can click the text from the browser, the nvim cursor will readjus
 
 If you want to edit another file, simply do it the normal way.
 
-The browser tab will automatically opens that file as well.
+The browser tab will automatically open that file as well.
 
 That's about it! Thank you!
