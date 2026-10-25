@@ -22,7 +22,7 @@ M.config = {
 
 	overwrite_index_on_start = true,
 
-	refresh_events = { "InsertLeave", "TextChanged", "TextChangedI", "BufWritePost" },
+    refresh_events = { "InsertLeave", "TextChanged", "TextChangedI", "TextChangedP", "BufWritePost" },
 	debounce_ms = 300,
 
     -- sync browser scroll + cursor to the nvim cursor
@@ -65,7 +65,8 @@ M._augroup = nil
 M._active_bufnr = nil
 M._last_text_by_buf = {}
 M._server_instance = nil
-M._debounce_seq = 0
+M._written_tick = {}
+M._refresh_timer = nil
 M._workspace_dir = nil
 M._token = nil          -- live-server auth token (one per server lifetime)
 M._follow_augroup = nil
@@ -316,38 +317,47 @@ end
 local function maybe_refresh(bufnr)
 	bufnr = bufnr or vim.api.nvim_get_current_buf()
 
+	-- Read the tick before the text: the content we write is at least this new.
+	local tick = vim.api.nvim_buf_get_changedtick(bufnr)
 	local text = get_content_safe(bufnr)
 	if not text then
 		return false
 	end
 
 	if M._last_text_by_buf[bufnr] == text then
+		-- The edit didn't change what the preview shows. Tell the browser, so a
+		-- cursor message held back for this tick is released.
+		M._written_tick[bufnr] = tick
+		if M._server_instance then
+			pcall(ls_ws.broadcast, M._server_instance, { type = "tick", tick = tick })
+		end
 		return false
 	end
 
 	local dir = M._workspace_dir or ensure_workspace(bufnr)
 	write_content(dir, text, bufnr)
 	M._last_text_by_buf[bufnr] = text
+	M._written_tick[bufnr] = tick
 
-	-- Notify live-server of the content change for immediate SSE push
 	if M._server_instance then
-		pcall(ls_server.reload, M._server_instance, M.config.content_name)
+		pcall(ls_server.reload, M._server_instance, M.config.content_name, tick)
 	end
 
 	return true
 end
 
 local function debounced_refresh(bufnr)
-	M._debounce_seq = M._debounce_seq + 1
-	local this_call = M._debounce_seq
-
-    -- don't debounce if we change the buffer, otherwise it can be a race
-    -- condition. (maybe_refresh refreshes to the old bufnr)
-    vim.defer_fn(function()
-        if this_call ~= M._debounce_seq or bufnr ~= M._active_bufnr then return end
-        pcall(maybe_refresh, bufnr)
-    end, M.config.debounce_ms)
+	if not M._refresh_timer then
+		M._refresh_timer = vim.loop.new_timer()
+	end
+	M._refresh_timer:stop()
+	M._refresh_timer:start(M.config.debounce_ms, 0, vim.schedule_wrap(function()
+		-- Buffer switched meanwhile: start() already wrote the new buffer.
+		if bufnr ~= M._active_bufnr then return end
+		pcall(maybe_refresh, bufnr)
+	end))
 end
+
 
 ---------------------------------------------------------------------------
 -- Cursor sync (nvim -> browser)
@@ -365,16 +375,27 @@ end
 
 ---@param bufnr integer
 ---@param force boolean|nil  send even if nothing changed (e.g. on start / browser hello)
-local function send_cursor_sync(bufnr, force)
+---@param settled boolean|nil set by the deferred retry
+local function send_cursor_sync(bufnr, force, settled)
 	if not M.config.cursor_sync then return end
 	if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then return end
 	if vim.api.nvim_get_current_buf() ~= bufnr then return end
 
+    local tick = vim.api.nvim_buf_get_changedtick(bufnr)
 	local offset = content_line_offset(bufnr)
 	if not offset then return end
 
 	local pos = vim.api.nvim_win_get_cursor(0)
 	local mode = vim.api.nvim_get_mode().mode
+
+	-- Insert completion (modes "ic" / "ix") passes through transient states:
+	-- nvim deletes the typed text, then re-inserts the match, and fires
+	-- CursorMovedI in between. Re-read the state once the loop has settled.
+	if not settled and (mode == "ic" or mode == "ix") then
+		vim.schedule(function() send_cursor_sync(bufnr, force, true) end)
+		return
+	end
+
 	local text = vim.api.nvim_get_current_line()
 
 	local last = M._last_cursor
@@ -388,10 +409,17 @@ local function send_cursor_sync(bufnr, force)
 	if M._server_instance then
 		local ok, err = pcall(ls_ws.broadcast, M._server_instance, {
 			type = "cursor",
-			line = pos[1] - 1 + offset, -- 0-based line in content.md
-			col = pos[2],               -- 0-based BYTE column; JS converts to UTF-16
+            -- 0-based line in content.md
+			line = pos[1] - 1 + offset,
+            -- 0-based BYTE column; JS converts to UTF-16
+			col = pos[2],
 			mode = mode,
-			text = text,                -- current line, so the cursor is right before the debounced reload
+            -- current line, so the cursor is right before the debounced reload
+			text = text,
+            tick = tick,
+            -- false while this edit's content hasn't been pushed yet: the
+            -- browser holds the cursor until that content has rendered
+            fresh = M._written_tick[bufnr] == tick,
 			total = vim.api.nvim_buf_line_count(bufnr) + offset,
 		})
 		if not ok then
@@ -455,7 +483,6 @@ end
 -- Handle messages sent by the browser over the websocket. Runs in a libuv
 -- callback.
 local function on_browser_message(raw)
-    print("WS <-: " .. raw)
 	vim.schedule(function()
 		local ok, msg = pcall(vim.json.decode, raw)
 		if not ok or type(msg) ~= "table" then return end
@@ -564,6 +591,7 @@ function M.start()
 	local bufnr = vim.api.nvim_get_current_buf()
 	M._active_bufnr = bufnr
 	M._last_cursor = nil -- force the first cursor message after (re)start
+    local tick = vim.api.nvim_buf_get_changedtick(bufnr)
 
 	local ok_content, text = pcall(get_content, bufnr)
 	if not ok_content then
@@ -583,6 +611,7 @@ function M.start()
 	write_index_if_needed(dir)
 	write_content(dir, text, bufnr)
 	M._last_text_by_buf[bufnr] = text
+    M._written_tick[bufnr] = tick
 
 	set_autocmds_for_buffer(bufnr)
     set_follow_autocmd()
@@ -612,11 +641,6 @@ function M.start()
 			root = dir,
 			default_index = index_path,
 			headers = { ["cache-control"] = "no-cache" },
-            -- No cors: the preview page is same-origin. cors would let any
-            -- website in the browser read the token out from the index page.
-			live = {
-				debounce = 100,
-			},
 			-- The browser sends {type="hello"} when its websocket opens; reply
 			-- with the current cursor so a fresh/reconnected tab is in sync.
 			on_message = on_browser_message,
@@ -654,7 +678,7 @@ function M.start()
 	else
 		-- Server already running in this nvim: retarget to this buffer's workspace
 		pcall(ls_server.update_target, M._server_instance, dir, index_path)
-		pcall(ls_server.reload, M._server_instance, M.config.content_name)
+		pcall(ls_server.reload, M._server_instance, M.config.content_name, tick)
 
 		if type(M.config.hooks.on_start) == "function" then
 			M.config.hooks.on_start(browser_url(M._server_instance.port))
@@ -694,10 +718,15 @@ function M.stop()
 		pcall(vim.api.nvim_del_augroup_by_id, M._follow_augroup)
 		M._follow_augroup = nil
 	end
+    if M._refresh_timer then
+        M._refresh_timer:stop()
+        M._refresh_timer:close()
+        M._refresh_timer = nil
+    end
+    M._written_tick = {}
 	M._workspace_dir = nil
 	M._last_cursor = nil
 	M._token = nil
-
 	if type(M.config.hooks.on_stop) == "function" then
 		M.config.hooks.on_stop()
 	end

@@ -430,13 +430,14 @@ function S.update_target(inst, new_root, new_index)
 end
 
 -- Live-reload controls
----@type fun(inst: ServerInstance, reason_path: string)
-function S.reload(inst, reason_path)
+---@type fun(inst: ServerInstance, reason_path: string, tick: integer)
+function S.reload(inst, reason_path, tick)
     local rp = tostring(reason_path or "")
     ws.broadcast(inst, {
         type = "reload",
         ts = (":%d"):format(os.time()),
         path = rp,
+        tick = tick,
     })
 end
 

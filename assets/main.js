@@ -1,6 +1,3 @@
-import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
-import markdownItGithubAlerts from 'https://unpkg.com/markdown-it-github-alerts@1.0.1/dist/index.mjs';
-
 /************************************************************
  * Constants
  ************************************************************/
@@ -18,9 +15,12 @@ const CHECK_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none">
 // Live-reload auth token. Either substituted into the document by
 // live-preview.nvim at file-write time, or passed via ?t=<token>
 // in the URL on first load (then stashed in sessionStorage so it
-// survives refreshes).
+// survives refreshes). Empty string when the server has no auth.
 const LIVE_TOKEN = (() => {
     const fromAttr = document.documentElement.dataset.liveToken || '';
+    // Split literal: a whole '__LIVE_TOKEN__' here would itself be
+    // rewritten by write_index's substitution, turning this guard
+    // into token !== token and breaking auth on tab reuse (issue #31).
     if (fromAttr && fromAttr !== '__LIVE' + '_TOKEN__') {
         try { sessionStorage.setItem('mdp-token', fromAttr); } catch (_) {}
         return fromAttr;
@@ -35,11 +35,18 @@ const LIVE_TOKEN = (() => {
 
 const YAML_MODE = document.documentElement.dataset.yamlMode || 'panel';
 
+const PENDING_CURSOR_MS = 250;    // safety net: never hold a cursor longer
+
+const CURSOR_ANIM_MS = 80;        // 0 = no animation
+const CURSOR_ANIM_MAX_PX = 500;   // farther than this, cursor and page just jump
+const REDUCED_MOTION = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
 /************************************************************
  * DOM Elements
  ************************************************************/
 const $ = (id) => document.getElementById(id);
 const contentEl = $('content');
+const statusEl = $('status');
 const themeBtn = $('themeBtn');
 const statusDot = $('statusDot');
 const loadingSkeleton = $('loadingSkeleton');
@@ -77,6 +84,20 @@ let scrollSyncPaused = false;
 let scrollSyncPauseTimer = null;
 let lastScrollData = null;
 
+// Cursor/content ordering. In insert mode nvim's cursor message arrives before
+// the content it belongs to (the content is pushed right after). Drawing the
+// cursor against the old DOM puts it in the wrong place, so a cursor message
+// whose edit hasn't rendered yet is held back until it has.
+let renderedTick = -1;      // changedtick of the content on screen
+let pendingCursor = null;   // cursor message waiting for its content
+let pendingTimer = null;
+
+// Cursor animation. The cursor and the page scroll are tweened together in one
+// requestAnimationFrame loop, so a recentring scroll and the cursor move as one
+// (a CSS transition on the cursor alone would trail behind an instant scroll).
+let cursorShown = null;   // {x, y}: where the cursor is drawn right now
+let cursorTween = null;   // {raf, x, y, scrollTop} of the running animation
+
 // Overlay state
 let ovSvgSource = '';
 let ovBaseW = 0, ovBaseH = 0;
@@ -88,12 +109,45 @@ let ovDragging = false, ovStartX = 0, ovStartY = 0, ovStartL = 0, ovStartT = 0;
 let md = null;
 let capturedFrontMatter = null;
 
-// Utfc codec
+// Utf8 codec
 const utf8enc = new TextEncoder(), utf8dec = new TextDecoder();
+
+/************************************************************
+ * Lazy CDN modules
+ *
+ * These used to be static `import` lines. A static import holds back the
+ * whole module until the CDN delivers it, so connectWS() (and the "hello"
+ * sent when the socket opens) waited on the slowest download. Loading them
+ * dynamically lets main() start immediately.
+ ************************************************************/
+let mermaid = null;
+const mermaidReady = (async () => {
+    const m = (await import('https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs')).default;
+    if (document.documentElement.dataset.mermaidElk === 'true') {
+        const elk = await import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.1/dist/mermaid-layout-elk.esm.min.mjs');
+        m.registerLayoutLoaders(elk.default || elk);
+    }
+    mermaid = m;
+    applyTheme(currentTheme); // initialize mermaid with the current theme
+    return m;
+})().catch((e) => {
+    console.error('[live-preview] mermaid failed to load:', e);
+    return null;
+});
+
+const alertsReady = import('https://cdn.jsdelivr.net/npm/markdown-it-github-alerts@1.0.1/dist/index.mjs')
+    .then((m) => m.default)
+    .catch((e) => {
+        console.warn('[live-preview] github-alerts failed to load:', e);
+        return null;
+    });
 
 /************************************************************
  * Utils
  ************************************************************/
+
+const setStatus = (t) => { if (statusEl) statusEl.textContent = t || ''; };
+const nowTime = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
 function setConnectionState(state) {
     statusDot.className = 'status-dot' + (state === 'connected' ? ' connected' : state === 'error' ? ' error' : '');
@@ -120,53 +174,48 @@ function applyTheme(theme) {
             ? 'https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github-dark.min.css'
             : 'https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github.min.css';
     }
-    mermaid.initialize({
-        startOnLoad: false,
-        theme: theme === 'dark' ? 'dark' : 'default',
-        securityLevel: 'strict',
-    });
+    // mermaid may still be downloading; mermaidReady re-applies the theme.
+    if (mermaid) {
+        mermaid.initialize({
+            startOnLoad: false,
+            theme: theme === 'dark' ? 'dark' : 'default',
+            securityLevel: 'strict',
+        });
+    }
 }
 
 /************************************************************
  * Markdown-it
  ************************************************************/
 
-function setupMarkdownit() {
+function setupMarkdownit(alerts) {
     if (!window.markdownit) {
-        console.error('[live-preview] markdown-it not loaded from CDN');
-        showContent();
-        contentEl.innerHTML = '<p style="color:var(--err-fg)">Failed to load markdown-it from CDN. Check your internet connection.</p>';
+        throw new Error('markdown-it failed to load from the CDN. Check your internet connection.');
     }
-
-    function custom_highlight(str, lang) {
-        if (lang && lang.toLowerCase() === 'mermaid') {
-            const encoded = encodeURIComponent(str);
-            return `<div class="mermaid-block" data-mermaid-source="${encoded}">
-                        <div class="mermaid-svg-wrap">
-                            <p style="color:var(--fg-muted);font-size:.85rem">Rendering diagram&hellip;</p>
-                        </div>
-                    </div>`;
-        }
-        if (lang && window.hljs && window.hljs.getLanguage(lang)) {
-            try {
-                return  `<pre class="hljs" data-lang="${md.utils.escapeHtml(lang)}">
-                            <code>${window.hljs.highlight(str, { language: lang, ignoreIllegals: true }).value}</code>
-                        </pre>`;
-
-            } catch (_) { }
-        }
-        const langAttr = lang ? ' data-lang="' + md.utils.escapeHtml(lang) + '"' : '';
-        return `<pre class="hljs"${langAttr}><code>${md.utils.escapeHtml(str)}</code></pre>`
-    }
-
-    md = (window.markdownit || function () { return { render: (t) => '<pre>' + t + '</pre>', utils: { escapeHtml: (s) => s } }; })({
+    md = window.markdownit({
         // Raw HTML passthrough is configurable: untrusted markdown can
         // otherwise inject handlers/scripts into this page. Defaults to
         // enabled (GitHub-like) when the attribute is absent.
         html: document.documentElement.dataset.allowHtml !== 'false',
         linkify: true,
         typographer: true,
-        highlight: custom_highlight
+        highlight: function (str, lang) {
+            if (lang && lang.toLowerCase() === 'mermaid') {
+                const encoded = encodeURIComponent(str);
+                return `<div class="mermaid-block" data-mermaid-source="${encoded}">
+                            <div class="mermaid-svg-wrap"><p style="color:var(--fg-muted);font-size:.85rem">Rendering diagram&hellip;</p></div>
+                        </div>`;
+            }
+            if (lang && window.hljs && window.hljs.getLanguage(lang)) {
+                try {
+                    return '<pre class="hljs" data-lang="' + md.utils.escapeHtml(lang) + '"><code>' +
+                        window.hljs.highlight(str, { language: lang, ignoreIllegals: true }).value +
+                        '</code></pre>';
+                } catch (_) { }
+            }
+            const langAttr = lang ? ' data-lang="' + md.utils.escapeHtml(lang) + '"' : '';
+            return '<pre class="hljs"' + langAttr + '><code>' + md.utils.escapeHtml(str) + '</code></pre>';
+        }
     });
 
     // Inline block rule; the CDN build of markdown-it-front-matter is
@@ -194,7 +243,7 @@ function setupMarkdownit() {
     }
 
     // Register plugins
-    md.use(markdownItGithubAlerts);
+    if (alerts) md.use(alerts);
     if (window.markdownitEmoji) md.use(window.markdownitEmoji);
     if (window.markdownitFootnote) md.use(window.markdownitFootnote);
     if (window.markdownitTaskLists) md.use(window.markdownitTaskLists, { enabled: false });
@@ -231,14 +280,12 @@ function setupMarkdownit() {
         if (info === 'mermaid') {
             const encoded = encodeURIComponent(token.content);
             const stableId = 'mmd-' + idx;
-            return `<div class="mermaid-block source-line"${lineAttr} id="${stableId}" data-mermaid-source="${encoded}" data-graph="mermaid">
-                        <button class="mermaid-expand-btn" title="Expand diagram" data-expand="${stableId}">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-                                <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                            </svg>
-                        </button>
-                        <div class="mermaid-svg-wrap"><p style="color:var(--fg-muted);font-size:.85rem">Rendering&hellip;</p></div>
-                    </div>`;
+            return `<div class="mermaid-block source-line"${lineAttr} id="${stableId}" data-mermaid-source="${encoded}" data-graph="mermaid">` +
+                `<button class="mermaid-expand-btn" title="Expand diagram" data-expand="${stableId}">` +
+                `<svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>` +
+                `</button>` +
+                `<div class="mermaid-svg-wrap"><p style="color:var(--fg-muted);font-size:.85rem">Rendering&hellip;</p></div>` +
+                `</div>`;
         }
         let html;
         if (defaultFence) {
@@ -313,6 +360,11 @@ async function renderMermaidBlock(block) {
 
     const wrap = block.querySelector('.mermaid-svg-wrap');
     if (!wrap) return;
+
+    if (!(await mermaidReady)) {
+        wrap.textContent = 'Failed to load mermaid from the CDN.';
+        return;
+    }
 
     const packs = detectPacks(source);
     for (const p of packs) await ensurePack(p);
@@ -421,13 +473,17 @@ async function fetchContent() {
     }
 }
 
-async function sync(initial = false) {
+async function syncImpl(initial = false, tick = null) {
+    // markdown-it isn't set up yet. A reload that arrives this early is safe
+    // to drop: the initial sync fetches the latest content anyway.
+    if (!md) return;
+
     const text = await fetchContent();
     if (text == null) {
         if (initial) setStatus('Waiting for content...');
         return;
     }
-    if (!initial && text === lastContent) return;
+    if (!initial && text === lastContent) { settleCursor(tick); return; }
     lastContent = text;
     srcLines = text.split('\n');
 
@@ -477,23 +533,39 @@ async function sync(initial = false) {
         }
 
         applyBottomPadding();
+        attachCopyButtons();
+
+        // Place the cursor before the diagrams render: they can be slow (the
+        // mermaid module may still be downloading) and the ResizeObserver
+        // re-places the cursor when they change the layout. Scroll on the
+        // first render so the cursor starts in view.
+        settleCursor(tick, initial);
 
         const blocks = contentEl.querySelectorAll('.mermaid-block[data-mermaid-source]:not(.mermaid-rendered)');
         for (const block of blocks) {
             await renderMermaidBlock(block);
         }
 
-        attachCopyButtons();
-
-        if (lastScrollData) placeCursor(lastScrollData, { scroll: false });
+        setStatus('Updated ' + nowTime());
     } catch (e) {
-        const preHtml =
-            `<pre style="white-space:pre-wrap;padding:1rem">
-                ${text.replace(/&/g, '&amp;').replace(/</g, '&lt;')}
-             </pre>`;
         console.error('[live-preview] render error:', e);
-        contentEl.innerHTML = preHtml;
+        contentEl.innerHTML = '<pre style="white-space:pre-wrap;padding:1rem">' +
+            text.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</pre>';
+        setStatus('Render error: ' + e.message);
     }
+}
+
+// Serialize renders: a "reload" can arrive while the previous render is still
+// awaiting mermaid, and two overlapping renders would fight over the DOM.
+let syncChain = Promise.resolve();
+function enqueue(fn) {
+    syncChain = syncChain
+        .then(fn)
+        .catch((e) => console.error('[live-preview] sync failed:', e));
+    return syncChain;
+}
+function sync(initial = false, tick = null) {
+    return enqueue(() => syncImpl(initial, tick));
 }
 
 /************************************************************
@@ -568,11 +640,7 @@ function caretRectAt(nodes, offset, wantWidth) {
     let acc = 0, node = null, o = 0;
     for (const n of nodes) {
         const len = n.nodeValue.length;
-        if (offset <= acc + len) {
-            node = n;
-            o = offset - acc;
-            break;
-        }
+        if (offset <= acc + len) { node = n; o = offset - acc; break; }
         acc += len;
     }
     if (!node) { node = nodes[nodes.length - 1]; o = node.nodeValue.length; }
@@ -587,31 +655,14 @@ function caretRectAt(nodes, offset, wantWidth) {
     let x = null, y, h, w = 0;
 
     const caret = rectOf(o, o);
-    if (caret) {
-        const c = caret[0];
-        x = c.left;
-        y = c.top;
-        h = c.height;
-    }
-    else if (o > 0 && rectOf(o - 1, o)) {
-        const rs = rectOf(o - 1, o);
-        const c = rs[rs.length - 1];
-        x = c.right;
-        y = c.top;
-        h = c.height;
-    }
-    else if (o < len && rectOf(o, o + 1)) {
-        const c = rectOf(o, o + 1)[0];
-        x = c.left;
-        y = c.top;
-        h = c.height;
-    }
+    if (caret) { const c = caret[0]; x = c.left; y = c.top; h = c.height; }
+    else if (o > 0 && rectOf(o - 1, o)) { const rs = rectOf(o - 1, o); const c = rs[rs.length - 1]; x = c.right; y = c.top; h = c.height; }
+    else if (o < len && rectOf(o, o + 1)) { const c = rectOf(o, o + 1)[0]; x = c.left; y = c.top; h = c.height; }
     if (x == null) return null;
 
     if (wantWidth && o < len) {
         const rs = rectOf(o, o + 1);
-        if (rs && rs[0].width > 0 && Math.abs(rs[0].top - y) < 2)
-            w = rs[0].width;
+        if (rs && rs[0].width > 0 && Math.abs(rs[0].top - y) < 2) w = rs[0].width;
     }
     return { x, y, h, w };
 }
@@ -622,10 +673,7 @@ function tableSegs(s) {
     for (let i = 0; i < s.length; i++) if (s[i] === '|' && s[i - 1] !== '\\') pipes.push(i);
     const segs = [];
     let prev = -1;
-    for (const p of pipes) {
-        segs.push([prev + 1, p]);
-        prev = p;
-    }
+    for (const p of pipes) { segs.push([prev + 1, p]); prev = p; }
     segs.push([prev + 1, s.length]);
     if (pipes.length && s.slice(0, pipes[0]).trim() === '') segs.shift();
     if (s.trimEnd().endsWith('|')) segs.pop();
@@ -648,23 +696,6 @@ function rowTarget(tr, s, col) {
     };
 }
 
-// Interpolation, only for lines that aren't in any block (blank lines etc.)
-function interpolatedTop(line, total) {
-    const elements = contentEl.querySelectorAll('[data-source-line]');
-    if (!elements.length || line <= 0) return 0;
-    if (line >= total - 1) return document.documentElement.scrollHeight;
-    const top = (el) => el.getBoundingClientRect().top + window.scrollY;
-    let prev = null, next = null;
-    for (const el of elements) {
-        const l = Number(el.dataset.sourceLine);
-        if (l <= line) prev = { el, line: l }; else { next = { el, line: l }; break; }
-    }
-    if (!prev) return 0;
-    const pt = top(prev.el);
-    if (next) return pt + (top(next.el) - pt) * ((line - prev.line) / (next.line - prev.line));
-    return pt;
-}
-
 // (line, utf16 col) -> client-space rect, or null
 function locateCursor(line, col, wantWidth) {
     let hit = null;
@@ -674,6 +705,10 @@ function locateCursor(line, col, wantWidth) {
         else if (s > line) break;
     }
     if (!hit) return null;
+    // A blank line points at nothing. Blocks can still span one (loose list
+    // items swallow the blank lines after them), so check the text itself.
+    // Code blocks are the exception: blank lines there are real content.
+    if (hit.dataset.kind !== 'code' && !(srcLines[line] ?? '').trim()) return null;
     const s = +hit.dataset.sourceLine, e = +hit.dataset.sourceEnd;
     const box = () => { const b = hit.getBoundingClientRect(); return { x: b.left, y: b.top, h: 18, w: 0 }; };
 
@@ -715,7 +750,17 @@ function locateCursor(line, col, wantWidth) {
     return caretRectAt(nodes, offset, wantWidth) || box();
 }
 
-function drawCursor(x, y, h, w, block) {
+function hideCursor() {
+    if (cursorTween) cancelAnimationFrame(cursorTween.raf);
+    cursorTween = null;
+    cursorShown = null;     // the next draw appears in place instead of sliding in
+    const el = document.getElementById('cursor');
+    if (el) el.style.display = 'none';
+}
+
+// x, y: target in document coordinates. scrollTop: page scroll to end at
+// (null = leave the scroll alone). animate=false snaps.
+function drawCursor(x, y, h, w, block, scrollTop = null, animate = true) {
     let el = document.getElementById('cursor');
     if (!el) {
         el = document.createElement('div');
@@ -723,14 +768,52 @@ function drawCursor(x, y, h, w, block) {
         document.body.appendChild(el);
     }
     el.classList.toggle('block', !!block);
-    el.style.left = `${x}px`;
-    el.style.top = `${y}px`;
     el.style.height = `${h}px`;
     el.style.width = block && w ? `${w}px` : '2px';
+
+    // Already heading to this spot: let the running animation finish.
+    if (cursorTween && Math.abs(cursorTween.x - x) < 0.5 && Math.abs(cursorTween.y - y) < 0.5 &&
+        cursorTween.scrollTop === scrollTop) return;
+    if (cursorTween) { cancelAnimationFrame(cursorTween.raf); cursorTween = null; }
+
+    const from = cursorShown;
+    const wasVisible = el.style.display === 'block';
+    const dist = from ? Math.hypot(x - from.x, y - from.y) : Infinity;
+    const scrollDist = scrollTop != null ? Math.abs(scrollTop - window.scrollY) : 0;
+    const animated = animate && CURSOR_ANIM_MS > 0 && !REDUCED_MOTION && wasVisible &&
+        (dist >= 0.5 || scrollDist >= 1) &&
+        dist < CURSOR_ANIM_MAX_PX && scrollDist < CURSOR_ANIM_MAX_PX;
+
     el.style.display = 'block';
+
+    if (!animated) {
+        el.style.left = `${x}px`;
+        el.style.top = `${y}px`;
+        cursorShown = { x, y };
+        if (scrollTop != null) window.scrollTo({ top: scrollTop, behavior: 'instant' });
+        return;
+    }
+
+    const x0 = from.x, y0 = from.y, s0 = window.scrollY;
+    const t0 = performance.now();
+    const tw = { raf: 0, x, y, scrollTop };
+    const step = (now) => {
+        const t = Math.min(1, (now - t0) / CURSOR_ANIM_MS);
+        const e = 1 - Math.pow(1 - t, 3);   // ease-out
+        const cx = x0 + (x - x0) * e;
+        const cy = y0 + (y - y0) * e;
+        el.style.left = `${cx}px`;
+        el.style.top = `${cy}px`;
+        cursorShown = { x: cx, y: cy };
+        if (scrollTop != null) window.scrollTo({ top: s0 + (scrollTop - s0) * e, behavior: 'instant' });
+        if (t < 1) tw.raf = requestAnimationFrame(step);
+        else cursorTween = null;
+    };
+    cursorTween = tw;
+    tw.raf = requestAnimationFrame(step);
 }
 
-function placeCursor(data, { scroll = true } = {}) {
+function placeCursor(data, { scroll = true, animate = true } = {}) {
     const line = data.line;
     if (data.text != null) srcLines[line] = data.text;   // fresher than last rendered content
     const col = byteColToUtf16(srcLines[line] ?? '', data.col || 0);
@@ -742,15 +825,46 @@ function placeCursor(data, { scroll = true } = {}) {
     } catch (e) {
         console.warn('[live-preview] locateCursor failed:', e);
     }
-    let px, py, h = 18, w = 0;
-    if (pos) {
-        px = pos.x + window.scrollX; py = pos.y + window.scrollY; h = pos.h; w = pos.w;
-    } else {
-        px = contentEl.getBoundingClientRect().left + window.scrollX;
-        py = interpolatedTop(line, data.total || 1); h = 0; w = 0;
+    if (!pos) {
+        // Blank lines (and anything outside the rendered blocks) point at
+        // nothing: remove the cursor completely and leave the scroll alone.
+        hideCursor();
+        return;
     }
-    drawCursor(px, py, h, w, block);
-    if (scroll) window.scrollTo({ top: Math.max(0, py - window.innerHeight / 2) });
+    const px = pos.x + window.scrollX, py = pos.y + window.scrollY;
+    const scrollTop = scroll ? Math.max(0, py - window.innerHeight / 2) : null;
+    drawCursor(px, py, pos.h, pos.w, block, scrollTop, animate);
+}
+
+// Content up to `tick` is now on screen: release the cursor held back for it.
+function settleCursor(tick, initial = false) {
+    if (tick != null) renderedTick = tick;
+    let released = false;
+    if (pendingCursor && (pendingCursor.tick == null || pendingCursor.tick <= renderedTick)) {
+        pendingCursor = null;
+        clearTimeout(pendingTimer);
+        released = true;
+    }
+    if (lastScrollData && !pendingCursor) {
+        placeCursor(lastScrollData, { scroll: (initial || released) && !scrollSyncPaused });
+    }
+}
+
+function onCursorMessage(data) {
+    lastScrollData = data;
+    clearTimeout(pendingTimer);
+    pendingCursor = null;
+    // fresh === false: nvim has an edit the browser hasn't been sent yet.
+    if (data.fresh === false && data.tick != null && data.tick > renderedTick) {
+        pendingCursor = data;
+        pendingTimer = setTimeout(() => {
+            if (pendingCursor !== data) return;
+            pendingCursor = null;
+            placeCursor(data, { scroll: !scrollSyncPaused });
+        }, PENDING_CURSOR_MS);
+        return;
+    }
+    placeCursor(data, { scroll: !scrollSyncPaused });
 }
 
 function sendToNvim(obj) {
@@ -852,10 +966,7 @@ function sourcePosFor(hit, node, offset) {
     for (let l = s; l < e; l++) {
         const vl = visibleLen(L(l).trimEnd());
         if (remaining <= vl || l === e - 1) {
-            return {
-                line: l,
-                col: sourceColFor(L(l), Math.min(remaining, vl))
-            };
+            return { line: l, col: sourceColFor(L(l), Math.min(remaining, vl)) };
         }
         remaining -= vl + 1;
     }
@@ -876,7 +987,7 @@ function jumpNvimTo(line, col) {
         text,
         total: lastScrollData?.total ?? srcLines.length,
     };
-    placeCursor(lastScrollData, { scroll: false });
+    placeCursor(lastScrollData, { scroll: false, animate: false });
 }
 
 /************************************************************
@@ -900,12 +1011,15 @@ function connectWS() {
             const data = JSON.parse(event.data);
             switch (data.type) {
                 case "reload":
-                    await sync(false);
+                    await sync(false, data.tick ?? null);
+                    break;
+                case "tick":
+                    // nvim saw an edit that left the rendered content unchanged
+                    await enqueue(() => settleCursor(data.tick ?? null));
                     break;
                 case "cursor":
                     if (data.line == null) return;
-                    lastScrollData = data;
-                    placeCursor(data, { scroll: !scrollSyncPaused });
+                    onCursorMessage(data);
                     break;
                 default:
                     break;
@@ -918,8 +1032,8 @@ function connectWS() {
     sock.addEventListener('close', () => {
         wsConnected = false;
         setConnectionState('error');
-        console.log('[live-preview] WebSocket disconnected. Reconnecting in 0.2s...');
-        setTimeout(connectWS, 200); // Auto-reconnect safety net
+        console.log('[live-preview] WebSocket disconnected. Reconnecting in 2s...');
+        setTimeout(connectWS, 2000); // Auto-reconnect safety net
     });
 
     sock.addEventListener('error', () => {
@@ -993,17 +1107,15 @@ function applyBottomPadding() {
  * Main
  ************************************************************/
 
-
 (async function main() {
+    // Open the socket first: nothing below blocks it any more.
+    connectWS();
     try {
-        // Apply theme
+        // Theme toggle
         themeBtn.addEventListener('click', () => {
             applyTheme(currentTheme === 'dark' ? 'light' : 'dark');
             renderAllMermaidBlocks();
         });
-
-        // Setup markdown-it
-        setupMarkdownit()
 
         // Pause scroll sync briefly when user scrolls the browser manually
         window.addEventListener('wheel', () => {
@@ -1123,22 +1235,18 @@ function applyBottomPadding() {
 
         // Re-place the cursor when layout shifts (images loading, window resize, etc.)
         new ResizeObserver(() => {
-            if (lastScrollData) placeCursor(lastScrollData, { scroll: !scrollSyncPaused });
+            if (lastScrollData && !pendingCursor) placeCursor(lastScrollData, { scroll: !scrollSyncPaused });
         }).observe(contentEl);
 
         // Bottom padding
         window.addEventListener('resize', applyBottomPadding);
 
-        if (document.documentElement.dataset.mermaidElk === 'true') {
-            const elkLayouts = await import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.1/dist/mermaid-layout-elk.esm.min.mjs');
-            mermaid.registerLayoutLoaders(elkLayouts.default || elkLayouts);
-        }
         applyTheme(currentTheme);
+        setupMarkdownit(await alertsReady);
         await sync(true);
     } catch (e) {
         console.error('[live-preview] boot error:', e);
         showContent();
         contentEl.innerHTML = '<p style="color:var(--err-fg)">Error: ' + (e.message || e) + '</p>';
     }
-    connectWS();
 })();
