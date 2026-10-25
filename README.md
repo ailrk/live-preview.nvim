@@ -3,12 +3,13 @@
 Markdown preview in the browser, updated as you type.
 
 - Live reload
-- Bidirecitonal cursor synchronization
+- Bidirecitonal cursor sync
 - Follows the markdown buffer you switch to
-- Mermaid diagrams, KaTeX math, GitHub alerts, task lists, footnotes
+- Mermaid diagrams
+- KaTeX
 - Relative images
 - YAML front matter panel
-- No extra dependencies
+- Stand alone plugin, no extra dependencies
 - One server per Neovim instance on a free port
 
 ## Install

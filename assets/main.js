@@ -43,7 +43,6 @@ const YAML_MODE = document.documentElement.dataset.yamlMode || 'panel';
  ************************************************************/
 const $ = (id) => document.getElementById(id);
 const contentEl = $('content');
-const statusEl = $('status');
 const themeBtn = $('themeBtn');
 const statusDot = $('statusDot');
 const loadingSkeleton = $('loadingSkeleton');
@@ -98,9 +97,6 @@ const utf8enc = new TextEncoder(), utf8dec = new TextDecoder();
 /************************************************************
  * Utils
  ************************************************************/
-
-const setStatus = (t) => { if (statusEl) statusEl.textContent = t || ''; };
-const nowTime = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
 function setConnectionState(state) {
     statusDot.className = 'status-dot' + (state === 'connected' ? ' connected' : state === 'error' ? ' error' : '');
@@ -483,13 +479,10 @@ async function sync(initial = false) {
         attachCopyButtons();
 
         if (lastScrollData) placeCursor(lastScrollData, { scroll: false });
-
-        setStatus('Updated ' + nowTime());
     } catch (e) {
         console.error('[live-preview] render error:', e);
         contentEl.innerHTML = '<pre style="white-space:pre-wrap;padding:1rem">' +
             text.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</pre>';
-        setStatus('Render error: ' + e.message);
     }
 }
 

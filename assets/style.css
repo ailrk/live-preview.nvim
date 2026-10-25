@@ -90,7 +90,6 @@ header {
     align-items: center;
     gap: .6rem;
     padding: .55rem 1.2rem;
-    background: var(--panel);
 }
 
 header h1 {
@@ -134,6 +133,17 @@ header h1 {
 #status {
     font-size: .75rem;
     color: var(--fg-muted);
+}
+
+.theme-dot{
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--fg-muted);
+    cursor: pointer;
+    opacity: .4;
+    transition: all .3s;
+    flex-shrink: 0;
 }
 
 .btn {
