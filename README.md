@@ -1,6 +1,6 @@
 # live-preview.nvim
 
-[demo](https://github.com/user-attachments/assets/669ce216-2e8f-47ae-a279-3187b282cb9a)
+[demo](https://github.com/user-attachments/assets/d1c44c0f-1d06-4b27-91e3-ba9dcde6e26e)
 
 Markdown preview in the browser, updated as you type.
 
