@@ -2,7 +2,6 @@
 
 [demo](https://github.com/user-attachments/assets/669ce216-2e8f-47ae-a279-3187b282cb9a)
 
-
 Markdown preview in the browser, updated as you type.
 
 - Live reload

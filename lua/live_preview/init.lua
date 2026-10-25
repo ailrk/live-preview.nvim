@@ -10,8 +10,8 @@ M.config = {
 	host = "127.0.0.1",
 	open_browser = true,
 
-	-- nil = system default browser. String for app/binary name (e.g. "Firefox",
-	-- "google-chrome"). Table for full command with args (URL is appended).
+    -- nil = system default browser. String for app/binary name (e.g. "Firefox",
+    -- "google-chrome").
 	browser = nil,
 
 	content_name = "content.md",
@@ -19,8 +19,6 @@ M.config = {
 
 	-- Path to a custom CSS file.
 	custom_css = "",
-
-	overwrite_index_on_start = true,
 
     refresh_events = { "InsertLeave", "TextChanged", "TextChangedI", "TextChangedP", "BufWritePost" },
 	debounce_ms = 300,
@@ -34,11 +32,10 @@ M.config = {
 	-- Extra asset roots (symlink targets / directories images may be served from).
 	extra_asset_roots = {},
 
-	-- Render raw HTML embedded in markdown (GitHub-like). Set false when
-	-- previewing untrusted markdown: raw HTML runs inside the preview page.
+    -- Render raw HTML embedded in markdown.
 	allow_raw_html = true,
 
-	-- YAML front matter (--- ... --- at the top of the file):
+	-- YAML front matter (jekyell style --- ... --- at the top of the file):
 	-- "panel" = strip it from the preview, show in a collapsible panel above
 	-- "hide"  = strip it entirely
 	-- "raw"   = leave it in the document (renders as markdown)
@@ -73,10 +70,6 @@ M._follow_augroup = nil
 
 ---@type {line:integer, col:integer, mode:string, text:string}|nil
 M._last_cursor = nil
-
-local function host_is_loopback()
-	return M.config.host == "127.0.0.1" or M.config.host == "localhost"
-end
 
 ---------------------------------------------------------------------------
 -- Workspace
@@ -113,15 +106,6 @@ local function write_index(dir)
 	content = content:gsub("__BOTTOM_PADDING__", function() return tostring(M.config.bottom_padding) end)
 	content = content:gsub("__STYLE_CSS__", function() return util.read_text(style_css) end)
 	content = content:gsub("__MAIN_JS__", function() return util.read_text(main_js) end)
-
-	-- Anchor to the attribute: index.html also contains the bare placeholder
-	-- as a JS sentinel, and substituting that too breaks auth (issue #31).
-	-- Bake the token only on loopback binds: on a network bind the index is
-	-- served to any peer that can reach the port, and a baked token would
-	-- defeat the auth entirely (the browser gets it via ?t= instead).
-	content = content:gsub('data%-live%-token="__LIVE_TOKEN__"', function()
-		return 'data-live-token="' .. (host_is_loopback() and M._token or "") .. '"'
-	end)
 	content = content:gsub("__THEME__", function() return M.config.default_theme end)
 	content = content:gsub("__ALLOW_HTML__", function() return M.config.allow_raw_html ~= false and "true" or "false" end)
 	content = content:gsub("__YAML_MODE__", function()
@@ -144,26 +128,6 @@ local function write_index(dir)
 	end
 
 	util.write_text(dst, content)
-	return dst
-end
-
-local function write_index_if_needed(dir)
-	if M.config.overwrite_index_on_start then
-		return write_index(dir)
-	end
-	local dst = vim.fs.joinpath(dir, M.config.index_name)
-	if not util.file_exists(dst) then
-		return write_index(dir)
-	end
-	-- Rewrite a persisted index whose baked token no longer matches what this
-	-- session serves. Covers a fresh token after restart AND a loopback<->
-	-- network switch (which flips whether the token is baked at all) — a stale
-	-- non-empty token on a network bind would otherwise 401 every request.
-	local want = 'data-live-token="' .. (host_is_loopback() and (M._token or "") or "") .. '"'
-	local ok, existing = pcall(util.read_text, dst)
-	if not ok or not existing:find(want, 1, true) then
-		return write_index(dir)
-	end
 	return dst
 end
 
@@ -608,7 +572,7 @@ function M.start()
 		M._token = ls_util.random_token(16)
 	end
 
-	write_index_if_needed(dir)
+	write_index(dir)
 	write_content(dir, text, bufnr)
 	M._last_text_by_buf[bufnr] = text
     M._written_tick[bufnr] = tick
@@ -616,22 +580,12 @@ function M.start()
 	set_autocmds_for_buffer(bufnr)
     set_follow_autocmd()
 
-	-- Patterns matching workspace-served files that require ?t=<token>.
-	-- vim.pesc escapes every Lua-pattern magic char, so custom content_name /
-	-- index_name values containing '-', '+', '.', etc. still gate correctly.
-	local content_path_pattern = "^/" .. vim.pesc(M.config.content_name) .. "$"
-
-	-- The asset_root sidecar is gated too: it holds the source file's
-	-- directory path, which is nobody's business but ours.
-	local protected = { content_path_pattern, "^/asset_root$" }
-	if not host_is_loopback() then
-		-- On a network bind the index page must be gated too: it is the
-		-- browser's bootstrap document, and serving it openly would hand the
-		-- preview to any peer that can reach the port. The tokenized ?t= URL
-		-- unlocks it.
-		table.insert(protected, "^/$")
-		table.insert(protected, "^/" .. vim.pesc(M.config.index_name) .. "$")
-	end
+    local protected = {
+        "^/" .. vim.pesc(M.config.content_name) .. "$",
+        "^/asset_root$",
+        "^/$",
+        "^/" .. vim.pesc(M.config.index_name) .. "$",
+    }
 
 	local index_path = vim.fs.joinpath(dir, M.config.index_name)
 

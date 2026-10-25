@@ -12,26 +12,8 @@ const SUN_SVG = '<circle cx="12" cy="12" r="5" stroke="currentColor" stroke-widt
 const COPY_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><rect x="9" y="9" width="13" height="13" rx="2" stroke="currentColor" stroke-width="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" stroke="currentColor" stroke-width="2"/></svg>';
 const CHECK_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M20 6 9 17l-5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
-// Live-reload auth token. Either substituted into the document by
-// live-preview.nvim at file-write time, or passed via ?t=<token>
-// in the URL on first load (then stashed in sessionStorage so it
-// survives refreshes). Empty string when the server has no auth.
-const LIVE_TOKEN = (() => {
-    const fromAttr = document.documentElement.dataset.liveToken || '';
-    // Split literal: a whole '__LIVE_TOKEN__' here would itself be
-    // rewritten by write_index's substitution, turning this guard
-    // into token !== token and breaking auth on tab reuse (issue #31).
-    if (fromAttr && fromAttr !== '__LIVE' + '_TOKEN__') {
-        try { sessionStorage.setItem('mdp-token', fromAttr); } catch (_) {}
-        return fromAttr;
-    }
-    const fromUrl = new URLSearchParams(location.search).get('t');
-    if (fromUrl) {
-        try { sessionStorage.setItem('mdp-token', fromUrl); } catch (_) {}
-        return fromUrl;
-    }
-    try { return sessionStorage.getItem('mdp-token') || ''; } catch (_) { return ''; }
-})();
+// Live-reload auth token, stashed in sessionStorage to survive refresh.
+const LIVE_TOKEN = new URLSearchParams(location.search).get('t') || '';
 
 const YAML_MODE = document.documentElement.dataset.yamlMode || 'panel';
 
