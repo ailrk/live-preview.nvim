@@ -1,5 +1,4 @@
 -- lua/live_preview/init.lua
-local ts = require("live_preview.ts")
 local util = require("live_preview.util")
 local ls_ws = require("live_preview.server.http.ws")
 local ls_server = require("live_preview.server")
@@ -13,31 +12,23 @@ M.config = {
 
 	-- nil = system default browser. String for app/binary name (e.g. "Firefox",
 	-- "google-chrome"). Table for full command with args (URL is appended).
-	-- On macOS, string values are passed via `open -a <name>`.
 	browser = nil,
 
 	content_name = "content.md",
 	index_name = "index.html",
 
-	-- Path to a CSS file injected after the bundled styles, so user rules win
-	-- the cascade without !important. Supports ~ and $VARS. "" = disabled.
+	-- Path to a custom CSS file.
 	custom_css = "",
-
-	-- nil = per-buffer workspace (recommended); set a path to override
-	workspace_dir = nil,
 
 	overwrite_index_on_start = true,
 
 	refresh_events = { "InsertLeave", "TextChanged", "TextChangedI", "BufWritePost" },
 	debounce_ms = 300,
 
-	-- Load ELK layout engine for mermaid diagrams (requires internet; adds ~800 KB).
-	-- Enables %%{init: {"layout": "elk"}}%% in diagrams.
-	mermaid_elk = false,
+    -- sync browser scroll + cursor to the nvim cursor
+	cursor_sync = true,
 
-	cursor_sync = true, -- sync browser scroll + cursor to the nvim cursor
-
-	-- "dark" or "light"; determines the initial theme of the preview page
+	-- "dark" | "light"
 	default_theme = "light",
 
 	-- Extra asset roots (symlink targets / directories images may be served from).
@@ -53,8 +44,7 @@ M.config = {
 	-- "raw"   = leave it in the document (renders as markdown)
 	yaml_mode = "panel",
 
-	-- Fraction (0–1): vertical position of the final line when scrolled to end.
-	--- 0.5 = middle of viewport (default), 1.0 = bottom edge (no extra space)
+	-- Fraction (0–1): 0.5 = middle of viewport, 1.0 = bottom edge
 	bottom_padding = 0.5,
 
 	hooks = {
@@ -68,7 +58,6 @@ M.config = {
 function M.setup(opts)
 	M.config = vim.tbl_deep_extend("force", M.config, opts or {})
 	M.config.bottom_padding = math.max(0, math.min(1, M.config.bottom_padding))
-	M._mmdr_available = nil -- reset so next check re-probes
 end
 
 -- Internal state
@@ -78,7 +67,6 @@ M._last_text_by_buf = {}
 M._server_instance = nil
 M._debounce_seq = 0
 M._workspace_dir = nil
-M._mmdr_available = nil -- nil = unchecked, true/false after probe
 M._token = nil          -- live-server auth token (one per server lifetime)
 M._follow_augroup = nil
 
@@ -93,15 +81,8 @@ end
 -- Workspace
 ---------------------------------------------------------------------------
 
-local function resolve_workspace(bufnr)
-	if M.config.workspace_dir then
-		return M.config.workspace_dir
-	end
-	return util.workspace_for_buffer(bufnr)
-end
-
 local function ensure_workspace(bufnr)
-	local dir = resolve_workspace(bufnr)
+	local dir = util.workspace_for_buffer(bufnr)
 	util.mkdirp(dir)
 	return dir
 end
@@ -128,10 +109,7 @@ local function write_index(dir)
 		error("Could not locate assets/main.js")
 	end
 
-	-- gsub with function replacement: avoids the "%n is a capture reference"
-	-- escape problem if any substituted value contains '%'.
 	content = content:gsub("__BOTTOM_PADDING__", function() return tostring(M.config.bottom_padding) end)
-	content = content:gsub("__MERMAID_ELK__", function() return M.config.mermaid_elk and "true" or "false" end)
 	content = content:gsub("__STYLE_CSS__", function() return util.read_text(style_css) end)
 	content = content:gsub("__MAIN_JS__", function() return util.read_text(main_js) end)
 
@@ -168,7 +146,6 @@ local function write_index(dir)
 	return dst
 end
 
-
 local function write_index_if_needed(dir)
 	if M.config.overwrite_index_on_start then
 		return write_index(dir)
@@ -193,20 +170,82 @@ end
 -- Mermaid extraction
 ---------------------------------------------------------------------------
 
-local function extract_mermaid_under_cursor_strict(bufnr)
-	local ok, text = pcall(ts.extract_under_cursor, bufnr)
-	if ok and text and #text > 0 then
-		return text
+-- Extracts the mermaid fenced code block covering the cursor using Tree-sitter.
+---@param bufnr integer
+---@return string|nil
+local function extract_under_cursor(bufnr)
+    local function get_node_text(node)
+        return vim.treesitter.get_node_text(node, bufnr)
+    end
+
+	local ok, parser = pcall(vim.treesitter.get_parser, bufnr, "markdown")
+	if not ok then
+		error("No Tree-sitter parser for markdown")
 	end
-	return nil
+	local tree = parser:parse()[1]
+	local root = tree:root()
+
+	local query = vim.treesitter.query.parse(
+		"markdown",
+		[[
+    (fenced_code_block
+      (info_string) @info
+      (code_fence_content) @content)
+  ]])
+
+	local cursor = vim.api.nvim_win_get_cursor(0)
+	local cur_row = cursor[1] - 1
+
+	for _, nodes, _ in query:iter_matches(root, bufnr, 0, -1) do
+		-- nodes[1] = info, nodes[2] = content (thanks to query order)
+		local info = nodes[1]
+		local content = nodes[2]
+		local block = info:parent()
+		local srow, _, erow, _ = block:range()
+		if cur_row >= srow and cur_row <= erow then
+			local info_txt = get_node_text(info):lower()
+			if info_txt:match("mermaid") then
+				return get_node_text(content)
+			end
+		end
+	end
+	error("Cursor is not inside a mermaid fenced code block")
+end
+
+-- Fallback: simple regex scan for the nearest mermaid block above the cursor
+local function fallback_scan(bufnr)
+	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+	local row = vim.api.nvim_win_get_cursor(0)[1]
+	local i = row
+	-- search upwards for ```mermaid
+	while i >= 1 do
+		if lines[i]:match("^%s*```%s*mermaid") then
+			break
+		end
+		i = i - 1
+	end
+	if i < 1 then
+		return nil
+	end
+	i = i + 1
+	local acc = {}
+	while i <= #lines and not lines[i]:match("^%s*```%s*$") do
+		table.insert(acc, lines[i])
+		i = i + 1
+	end
+	return table.concat(acc, "\n")
 end
 
 local function extract_mermaid_under_cursor(bufnr)
-	local text = extract_mermaid_under_cursor_strict(bufnr)
+	local ok, text = pcall(extract_under_cursor, bufnr)
+	if not (ok and text and #text > 0) then
+		text = nil
+	end
+
 	if text and #text > 0 then
 		return text
 	end
-	local fallback = ts.fallback_scan(bufnr)
+	local fallback = fallback_scan(bufnr)
 	if not fallback or #fallback == 0 then
 		error("No ```mermaid fenced code block found under (or above) the cursor")
 	end
@@ -217,10 +256,10 @@ end
 -- Content writing (unified: markdown or mermaid)
 ---------------------------------------------------------------------------
 
----Get the content to write based on filetype.
----Markdown buffers: entire buffer.
----Mermaid files (.mmd, .mermaid): entire buffer wrapped in mermaid fence.
----Others: mermaid block under cursor wrapped in fence.
+-- Get the content to write based on filetype.
+-- Markdown buffers: entire buffer.
+-- Mermaid files (.mmd, .mermaid): entire buffer wrapped in mermaid fence.
+-- Others: mermaid block under cursor wrapped in fence.
 ---@param bufnr integer
 ---@return string
 local function get_content(bufnr)
@@ -243,7 +282,7 @@ local function get_content(bufnr)
 	return text
 end
 
----Same as get_content but never errors (returns nil on failure).
+-- Same as get_content but never errors (returns nil on failure).
 ---@param bufnr integer
 ---@return string|nil
 local function get_content_safe(bufnr)
@@ -302,8 +341,8 @@ local function debounced_refresh(bufnr)
 	M._debounce_seq = M._debounce_seq + 1
 	local this_call = M._debounce_seq
 
-    --- don't debounce if we change the buffer, otherwise it can be a race
-    --- condition. (maybe_refresh refreshes to the old bufnr)
+    -- don't debounce if we change the buffer, otherwise it can be a race
+    -- condition. (maybe_refresh refreshes to the old bufnr)
     vim.defer_fn(function()
         if this_call ~= M._debounce_seq or bufnr ~= M._active_bufnr then return end
         pcall(maybe_refresh, bufnr)
@@ -365,7 +404,7 @@ end
 -- Cursor sync (browser -> nvim)
 ---------------------------------------------------------------------------
 
----Move the cursor in the previewed buffer to a position sent by the browser.
+-- Move the cursor in the previewed buffer to a position sent by the browser.
 ---@param msg table {line: number (0-based, content.md), col: number (0-based BYTE col)}
 local function goto_position(msg)
 	if not M.config.cursor_sync then return end
@@ -569,8 +608,6 @@ function M.start()
 
 	if not M._server_instance then
 		local ok, inst = pcall(ls_server.start, {
-            -- the OS picks a free port
-			port = 0,
 			host = M.config.host,
 			root = dir,
 			default_index = index_path,
@@ -578,14 +615,11 @@ function M.start()
             -- No cors: the preview page is same-origin. cors would let any
             -- website in the browser read the token out from the index page.
 			live = {
-				enabled = true,
-				inject_script = false,
 				debounce = 100,
 			},
 			-- The browser sends {type="hello"} when its websocket opens; reply
 			-- with the current cursor so a fresh/reconnected tab is in sync.
 			on_message = on_browser_message,
-			features = { dirlist = { enabled = false } },
 			token = M._token,
 			protected_paths = protected,
             -- Resolve relative image paths against the source file's dir. Read

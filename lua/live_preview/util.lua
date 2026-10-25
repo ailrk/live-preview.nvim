@@ -69,14 +69,14 @@ function M.resolve_asset(rel)
 	return nil
 end
 
----Launch a detached command; true when the process spawned.
----(vim.fn.jobstart raises for a non-executable command, so pcall it.)
+-- Launch a detached command; true when the process spawned.
+-- (vim.fn.jobstart raises for a non-executable command, so pcall it.)
 local function try_launch(cmd, opts)
 	local ok, job = pcall(vim.fn.jobstart, cmd, opts or { detach = true })
 	return ok and job > 0
 end
 
----Open a URL in the browser.
+-- Open a URL in the browser.
 ---@param url string
 ---@param browser string|table|nil Optional override. String = browser name/binary.
 ---  Table = full command (URL appended). nil = system default.
@@ -142,7 +142,7 @@ function M.open_in_browser(url, browser)
 	warn("could not open a browser automatically")
 end
 
----Generate a per-buffer workspace directory under Neovim's cache.
+-- Generate a per-buffer workspace directory under Neovim's cache.
 ---@param bufnr integer
 ---@return string
 function M.workspace_for_buffer(bufnr)

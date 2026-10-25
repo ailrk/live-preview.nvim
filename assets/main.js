@@ -18,12 +18,9 @@ const CHECK_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none">
 // Live-reload auth token. Either substituted into the document by
 // live-preview.nvim at file-write time, or passed via ?t=<token>
 // in the URL on first load (then stashed in sessionStorage so it
-// survives refreshes). Empty string when the server has no auth.
+// survives refreshes).
 const LIVE_TOKEN = (() => {
     const fromAttr = document.documentElement.dataset.liveToken || '';
-    // Split literal: a whole '__LIVE_TOKEN__' here would itself be
-    // rewritten by write_index's substitution, turning this guard
-    // into token !== token and breaking auth on tab reuse (issue #31).
     if (fromAttr && fromAttr !== '__LIVE' + '_TOKEN__') {
         try { sessionStorage.setItem('mdp-token', fromAttr); } catch (_) {}
         return fromAttr;
@@ -140,6 +137,28 @@ function setupMarkdownit() {
         showContent();
         contentEl.innerHTML = '<p style="color:var(--err-fg)">Failed to load markdown-it from CDN. Check your internet connection.</p>';
     }
+
+    function custom_highlight(str, lang) {
+        if (lang && lang.toLowerCase() === 'mermaid') {
+            const encoded = encodeURIComponent(str);
+            return `<div class="mermaid-block" data-mermaid-source="${encoded}">
+                        <div class="mermaid-svg-wrap">
+                            <p style="color:var(--fg-muted);font-size:.85rem">Rendering diagram&hellip;</p>
+                        </div>
+                    </div>`;
+        }
+        if (lang && window.hljs && window.hljs.getLanguage(lang)) {
+            try {
+                return  `<pre class="hljs" data-lang="${md.utils.escapeHtml(lang)}">
+                            <code>${window.hljs.highlight(str, { language: lang, ignoreIllegals: true }).value}</code>
+                        </pre>`;
+
+            } catch (_) { }
+        }
+        const langAttr = lang ? ' data-lang="' + md.utils.escapeHtml(lang) + '"' : '';
+        return `<pre class="hljs"${langAttr}><code>${md.utils.escapeHtml(str)}</code></pre>`
+    }
+
     md = (window.markdownit || function () { return { render: (t) => '<pre>' + t + '</pre>', utils: { escapeHtml: (s) => s } }; })({
         // Raw HTML passthrough is configurable: untrusted markdown can
         // otherwise inject handlers/scripts into this page. Defaults to
@@ -147,21 +166,7 @@ function setupMarkdownit() {
         html: document.documentElement.dataset.allowHtml !== 'false',
         linkify: true,
         typographer: true,
-        highlight: function (str, lang) {
-            if (lang && lang.toLowerCase() === 'mermaid') {
-                const encoded = encodeURIComponent(str);
-                return `<div class="mermaid-block" data-mermaid-source="${encoded}"><div class="mermaid-svg-wrap"><p style="color:var(--fg-muted);font-size:.85rem">Rendering diagram&hellip;</p></div></div>`;
-            }
-            if (lang && window.hljs && window.hljs.getLanguage(lang)) {
-                try {
-                    return '<pre class="hljs" data-lang="' + md.utils.escapeHtml(lang) + '"><code>' +
-                        window.hljs.highlight(str, { language: lang, ignoreIllegals: true }).value +
-                        '</code></pre>';
-                } catch (_) { }
-            }
-            const langAttr = lang ? ' data-lang="' + md.utils.escapeHtml(lang) + '"' : '';
-            return '<pre class="hljs"' + langAttr + '><code>' + md.utils.escapeHtml(str) + '</code></pre>';
-        }
+        highlight: custom_highlight
     });
 
     // Inline block rule; the CDN build of markdown-it-front-matter is
@@ -226,12 +231,14 @@ function setupMarkdownit() {
         if (info === 'mermaid') {
             const encoded = encodeURIComponent(token.content);
             const stableId = 'mmd-' + idx;
-            return `<div class="mermaid-block source-line"${lineAttr} id="${stableId}" data-mermaid-source="${encoded}" data-graph="mermaid">` +
-                `<button class="mermaid-expand-btn" title="Expand diagram" data-expand="${stableId}">` +
-                `<svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>` +
-                `</button>` +
-                `<div class="mermaid-svg-wrap"><p style="color:var(--fg-muted);font-size:.85rem">Rendering&hellip;</p></div>` +
-                `</div>`;
+            return `<div class="mermaid-block source-line"${lineAttr} id="${stableId}" data-mermaid-source="${encoded}" data-graph="mermaid">
+                        <button class="mermaid-expand-btn" title="Expand diagram" data-expand="${stableId}">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                                <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                        </button>
+                        <div class="mermaid-svg-wrap"><p style="color:var(--fg-muted);font-size:.85rem">Rendering&hellip;</p></div>
+                    </div>`;
         }
         let html;
         if (defaultFence) {
@@ -480,9 +487,12 @@ async function sync(initial = false) {
 
         if (lastScrollData) placeCursor(lastScrollData, { scroll: false });
     } catch (e) {
+        const preHtml =
+            `<pre style="white-space:pre-wrap;padding:1rem">
+                ${text.replace(/&/g, '&amp;').replace(/</g, '&lt;')}
+             </pre>`;
         console.error('[live-preview] render error:', e);
-        contentEl.innerHTML = '<pre style="white-space:pre-wrap;padding:1rem">' +
-            text.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</pre>';
+        contentEl.innerHTML = preHtml;
     }
 }
 
@@ -558,7 +568,11 @@ function caretRectAt(nodes, offset, wantWidth) {
     let acc = 0, node = null, o = 0;
     for (const n of nodes) {
         const len = n.nodeValue.length;
-        if (offset <= acc + len) { node = n; o = offset - acc; break; }
+        if (offset <= acc + len) {
+            node = n;
+            o = offset - acc;
+            break;
+        }
         acc += len;
     }
     if (!node) { node = nodes[nodes.length - 1]; o = node.nodeValue.length; }
@@ -573,14 +587,31 @@ function caretRectAt(nodes, offset, wantWidth) {
     let x = null, y, h, w = 0;
 
     const caret = rectOf(o, o);
-    if (caret) { const c = caret[0]; x = c.left; y = c.top; h = c.height; }
-    else if (o > 0 && rectOf(o - 1, o)) { const rs = rectOf(o - 1, o); const c = rs[rs.length - 1]; x = c.right; y = c.top; h = c.height; }
-    else if (o < len && rectOf(o, o + 1)) { const c = rectOf(o, o + 1)[0]; x = c.left; y = c.top; h = c.height; }
+    if (caret) {
+        const c = caret[0];
+        x = c.left;
+        y = c.top;
+        h = c.height;
+    }
+    else if (o > 0 && rectOf(o - 1, o)) {
+        const rs = rectOf(o - 1, o);
+        const c = rs[rs.length - 1];
+        x = c.right;
+        y = c.top;
+        h = c.height;
+    }
+    else if (o < len && rectOf(o, o + 1)) {
+        const c = rectOf(o, o + 1)[0];
+        x = c.left;
+        y = c.top;
+        h = c.height;
+    }
     if (x == null) return null;
 
     if (wantWidth && o < len) {
         const rs = rectOf(o, o + 1);
-        if (rs && rs[0].width > 0 && Math.abs(rs[0].top - y) < 2) w = rs[0].width;
+        if (rs && rs[0].width > 0 && Math.abs(rs[0].top - y) < 2)
+            w = rs[0].width;
     }
     return { x, y, h, w };
 }
@@ -591,7 +622,10 @@ function tableSegs(s) {
     for (let i = 0; i < s.length; i++) if (s[i] === '|' && s[i - 1] !== '\\') pipes.push(i);
     const segs = [];
     let prev = -1;
-    for (const p of pipes) { segs.push([prev + 1, p]); prev = p; }
+    for (const p of pipes) {
+        segs.push([prev + 1, p]);
+        prev = p;
+    }
     segs.push([prev + 1, s.length]);
     if (pipes.length && s.slice(0, pipes[0]).trim() === '') segs.shift();
     if (s.trimEnd().endsWith('|')) segs.pop();
@@ -818,7 +852,10 @@ function sourcePosFor(hit, node, offset) {
     for (let l = s; l < e; l++) {
         const vl = visibleLen(L(l).trimEnd());
         if (remaining <= vl || l === e - 1) {
-            return { line: l, col: sourceColFor(L(l), Math.min(remaining, vl)) };
+            return {
+                line: l,
+                col: sourceColFor(L(l), Math.min(remaining, vl))
+            };
         }
         remaining -= vl + 1;
     }

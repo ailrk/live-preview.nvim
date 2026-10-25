@@ -4,35 +4,25 @@ local http = require("live_preview.server.http")
 local ws = require("live_preview.server.http.ws")
 local S = {}
 
-
 ---@class ServerInstance
 ---@field handle uv.uv_tcp_t
----@field port integer
 ---@field host string
+---@field port number
 ---@field root string
 ---@field root_real string
 ---@field default_index string
 ---@field headers table<string, string>
 ---@field started_at integer
----@field live_enabled boolean
----@field inject_script boolean
 ---@field live_debounce integer
----@field css_inject boolean
 ---@field clients uv.uv_tcp_t[]
 ---@field on_message fun()
----@field debounce_timer uv.uv_timer_t
----@field dir_enabled boolean
----@field dir_show_hidden boolean
 ---@field index_names string[]
----@field ignore_patterns string[]
----@field notify_on_reload boolean
 ---@field token string?
 ---@field protected_paths string[]
 ---@field asset_root string|fun():string?|nil
 ---@field extra_asset_roots string[]
 ---@field fs_event uv.uv_fs_event_t?
 ---@field _fs_events table<string, uv.uv_fs_event_t>?
-
 
 -- Capability flags for callers to feature-detect against an independently
 -- versioned install (plugin managers update sibling plugins separately).
@@ -42,8 +32,7 @@ S.features = {
     asset_route = true,
 }
 
-
---- MIME type strings
+-- MIME type strings
 local MIME = {
     html = "text/html; charset=utf-8",
     htm = "text/html; charset=utf-8",
@@ -61,28 +50,26 @@ local MIME = {
     wasm = "application/wasm",
 }
 
-
 ---@type fun(path: string): string
 local function guess_mime(path)
     local ext = string.match(path, "%.([%w]+)$")
     return (ext and MIME[ext:lower()]) or "application/octet-stream"
 end
 
-
 ------------------------------------------------------------
 -- Path mapping & file read
 ------------------------------------------------------------
 
---- Canonicalize a request path so the auth gate and the file mapper can never
---- disagree. The following steps is performed:
----
---- 1. Strip the query, percent-decode
---- 2. then lexically resolve '.'/'..'
---- 3. collapse duplicate slashes.
----
---- Without this a peer could evade a protected_paths pattern with an encoded
---- or slash-padded variant that still resolves to the protected file:
---- //content.md, /content%2emd, /x/../content.md.
+-- Canonicalize a request path so the auth gate and the file mapper can never
+-- disagree. The following steps is performed:
+--
+-- 1. Strip the query, percent-decode
+-- 2. then lexically resolve '.'/'..'
+-- 3. collapse duplicate slashes.
+--
+-- Without this a peer could evade a protected_paths pattern with an encoded
+-- or slash-padded variant that still resolves to the protected file:
+-- //content.md, /content%2emd, /x/../content.md.
 ---@type fun(req_path: string): string
 local function normalize_path(req_path)
     local raw = req_path:match("^([^?#]*)") or req_path
@@ -98,10 +85,9 @@ local function normalize_path(req_path)
     return "/" .. table.concat(parts, "/")
 end
 
-
---- Map an already-normalized path (see normalize_path) to a real file under
---- root. realpath containment stays as defense in depth against anything
---- normalization missed (symlinks, filesystem-level surprises).
+-- Map an already-normalized path (see normalize_path) to a real file under
+-- root. realpath containment stays as defense in depth against anything
+-- normalization missed (symlinks, filesystem-level surprises).
 ---@type fun(norm_path: string, root_real: string): string|uv.uv_fs_t?
 local function sanitize_and_map(norm_path, root_real)
     if norm_path == "/" then
@@ -113,7 +99,6 @@ local function sanitize_and_map(norm_path, root_real)
     if not util.path_has_prefix(real, root_real) then return nil end
     return real
 end
-
 
 ---@type fun(abs_path: string): string?, uv.fs_stat.result?
 local function read_file_all(abs_path)
@@ -129,207 +114,21 @@ local function read_file_all(abs_path)
     return chunk, stat
 end
 
-
 ------------------------------------------------------------
---- Reload
-------------------------------------------------------------
-
-local function schedule_reload(inst, changed_path)
-    if not inst.live_enabled then return end
-    if changed_path and changed_path ~= "" and #inst.ignore_patterns > 0 then
-        if util.match_ignore(changed_path, inst.ignore_patterns) then return end
-    end
-    inst._last_change = changed_path or inst._last_change
-    inst.debounce_timer:stop()
-    inst.debounce_timer:start(inst.live_debounce, 0, function()
-        S.reload(inst, inst._last_change or "")
-    end)
-end
-
--- Recursively scan all subdirectories under root (for Linux fallback watchers)
-local function scan_dirs(root)
-    local dirs = { root }
-    local function walk(dir)
-        local handle = uv.fs_scandir(dir)
-        if not handle then return end
-        while true do
-            local name, typ = uv.fs_scandir_next(handle)
-            if not name then break end
-            if typ == "directory" and name ~= ".git" and name ~= "node_modules" then
-                local full = util.joinpath(dir, name)
-                dirs[#dirs + 1] = full
-                walk(full)
-            end
-        end
-    end
-    walk(root)
-    return dirs
-end
-
--- UV_FS_EVENT_RECURSIVE is only supported on macOS and Windows.
--- On Linux (inotify) the flag is silently ignored — it does NOT error,
--- it just watches only the given directory. We detect this via uv.os_uname().
-local function supports_recursive_watch()
-    local info = uv.os_uname()
-    local sys = info and info.sysname or ""
-    return sys == "Darwin" or sys:find("Windows") ~= nil
-end
-
--- Attach a single-directory fs_event watcher with a dir-aware callback
-local function add_dir_watch(inst, dir)
-    local ev = uv.new_fs_event()
-    if ev == nil then
-        error("failed to create fs event")
-    end
-    local cb = function(err, fname, _status)
-        if err then return end
-        local full = fname and fname ~= "" and util.joinpath(dir, fname) or dir
-        schedule_reload(inst, full)
-        -- Watch newly created subdirectories
-        if fname and fname ~= "" then
-            local st = uv.fs_stat(full)
-            if st and st.type == "directory" and not inst._fs_events[full] then
-                add_dir_watch(inst, full)
-            end
-        end
-    end
-    local ok = pcall(function() ev:start(dir, {}, cb) end)
-    if not ok then
-        pcall(function() ev:start(dir, cb) end)
-    end
-    inst._fs_events[dir] = ev
-end
-
----@type fun(inst: ServerInstance)
-local function stop_fs_watch(inst)
-    if inst.fs_event then
-        pcall(function() inst.fs_event:stop(); inst.fs_event:close() end)
-        inst.fs_event = nil
-    end
-    if inst._fs_events then
-        for _, ev in pairs(inst._fs_events) do
-            pcall(function() ev:stop(); ev:close() end)
-        end
-        inst._fs_events = nil
-    end
-end
-
-local function start_fs_watch(inst)
-    stop_fs_watch(inst)
-
-    if supports_recursive_watch() then
-        -- macOS / Windows: single recursive watcher
-        local single = uv.new_fs_event()
-        if single == nil then
-            error("failed to create new fs event")
-        end
-
-        local cb = function(err, fname, _status)
-            if err then return end
-            schedule_reload(inst, fname or "")
-        end
-        local ok = pcall(function() single:start(inst.root_real, { recursive = true }, cb) end)
-        if ok then
-            inst.fs_event = single
-            return
-        end
-        pcall(function() single:close() end)
-    end
-
-    -- Linux (or recursive failed): per-directory watchers
-    inst._fs_events = {}
-    for _, dir in ipairs(scan_dirs(inst.root_real)) do
-        add_dir_watch(inst, dir)
-    end
-end
-
-------------------------------------------------------------
--- HTML helpers (injection + templating)
+-- HTML helpers (templating)
 ------------------------------------------------------------
 
-local function send_html_with_injection(inst, sock, html, extra_headers)
-    if inst.inject_script then
-        local tag = '<script src="/__live/script.js"></script>'
-        if html:find("</body>", 1, true) then
-            html = html:gsub("</body>", tag .. "</body>", 1)
-        else
-            html = html .. tag
-        end
-    end
+local function send_html(sock, html, extra_headers)
     local headers = { ["Content-Type"] = "text/html; charset=utf-8" }
     for k, v in pairs(extra_headers or {}) do headers[k] = v end
     http.send_response(sock, 200, headers, html)
 end
 
-local function serve_html_file_with_injection(inst, sock, abs_path, extra_headers)
+local function serve_html_file(sock, abs_path, extra_headers)
     local body = read_file_all(abs_path)
     if not body then return http.http_404(sock, abs_path) end
-    send_html_with_injection(inst, sock, body, extra_headers)
+    send_html(sock, body, extra_headers)
 end
-
-------------------------------------------------------------
--- Directory listing
-------------------------------------------------------------
-
-local function dir_listing_html(inst, fs_path, req_path)
-    local entries = {}
-    local iter = uv.fs_scandir(fs_path)
-    if not iter then
-        return "<!doctype html><meta charset=utf-8><h2>Cannot read directory</h2>"
-    end
-    if req_path ~= "/" then
-        table.insert(entries, { name = "..", is_dir = true, up = true })
-    end
-    while true do
-        local name, t = uv.fs_scandir_next(iter)
-        if not name then break end
-        if not inst.dir_show_hidden and name:sub(1, 1) == "." then
-            -- skip hidden
-        else
-            table.insert(entries, { name = name, is_dir = (t == "directory") })
-        end
-    end
-    table.sort(entries, function(a, b)
-        if a.is_dir ~= b.is_dir then return a.is_dir end
-        return a.name:lower() < b.name:lower()
-    end)
-
-    local rows = {}
-    for _, e in ipairs(entries) do
-        local label = util.html_escape(e.name)
-        local href
-        if e.up then
-            local parent = req_path:gsub("/+$", ""):match("^(.*)/[^/]*$") or "/"
-            href = parent == "" and "/" or parent .. "/"
-        else
-            href = req_path ..
-            (req_path:sub(-1) == "/" and "" or "/") .. util.url_encode(e.name) .. (e.is_dir and "/" or "")
-        end
-        local icon = e.up and "⤴" or (e.is_dir and "📁" or "📄")
-        table.insert(rows, string.format(
-            '<tr><td class="ico">%s</td><td><a href="%s">%s</a></td></tr>',
-            icon, href, label
-        ))
-    end
-
-    local title = "Index of " .. util.html_escape(req_path)
-    local css = [[
-    <style>
-    :root{color-scheme:light dark}
-    body{font:14px/1.5 system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;padding:24px;max-width:900px;margin:auto}
-    h1{font-size:20px;margin:0 0 16px}
-    table{width:100%;border-collapse:collapse}
-    td{padding:6px 8px;border-bottom:1px solid rgba(127,127,127,.2)}
-    td.ico{width:2rem;text-align:center}
-    a{text-decoration:none} a:hover{text-decoration:underline}
-    </style>
-    ]]
-    return string.format([[
-    <!doctype html><html><head><meta charset="utf-8"><title>%s</title>%s</head>
-    <body><h1>%s</h1><table>%s</table></body></html>
-    ]], util.html_escape(title), css, util.html_escape(title), table.concat(rows))
-end
-
 
 ------------------------------------------------------------
 -- Static file streaming
@@ -370,18 +169,17 @@ local function stream_file(sock, abs_path, extra_headers)
     read_chunk()
 end
 
-
-local function serve_path(inst, sock, abs_path, req_path, extra_headers)
+local function serve_path(sock, abs_path, req_path, extra_headers)
     local mime = guess_mime(abs_path)
     if mime:find("^text/html") then
-        return serve_html_file_with_injection(inst, sock, abs_path, extra_headers)
+        return serve_html_file(sock, abs_path, extra_headers)
     else
         return stream_file(sock, abs_path, extra_headers)
     end
 end
 
 ------------------------------------------------------------
---- Server
+-- Server
 ------------------------------------------------------------
 
 ---@type fun(inst: ServerInstance, sock: uv.uv_tcp_t): fun()
@@ -408,7 +206,7 @@ local function on_request(inst, sock)
         end
 
         ----------------------------------------
-        --- token endpoint
+        -- token endpoint
         ----------------------------------------
 
         -- Canonicalize the path once; auth matching, endpoint dispatch,
@@ -455,7 +253,7 @@ local function on_request(inst, sock)
         end
 
         ------------------------------
-        --- Websocket
+        -- Websocket
         ------------------------------
 
         if path_only == "/__live/ws" then
@@ -464,7 +262,7 @@ local function on_request(inst, sock)
         end
 
         ------------------------------
-        --- Asset
+        -- Asset
         ------------------------------
 
         if path_only == "/__live/asset" then
@@ -508,10 +306,10 @@ local function on_request(inst, sock)
         end
 
         ------------------------------
-        --- Serving
+        -- Serving
         ------------------------------
 
-        --- Map path
+        -- Map path
         local mapped = sanitize_and_map(path_only, inst.root_real)
         if not mapped then return http.http_404(sock, req.path) end
 
@@ -527,22 +325,17 @@ local function on_request(inst, sock)
                 end
             end
             if candidate and uv.fs_stat(candidate) then
-                return serve_path(inst, sock, candidate, req.path, inst.headers)
-            end
-            if inst.dir_enabled then
-                local html = dir_listing_html(inst, mapped, req.path)
-                return send_html_with_injection(inst, sock, html, inst.headers)
+                return serve_path(sock, candidate, req.path, inst.headers)
             else
                 return http.http_404(sock, req.path .. " (no index)")
             end
         elseif st and st.type == "file" then
-            return serve_path(inst, sock, mapped, req.path, inst.headers)
+            return serve_path(sock, mapped, req.path, inst.headers)
         else
             return http.http_404(sock, req.path)
         end
     end
 end
-
 
 ---@type fun(inst: ServerInstance, tcp: uv.uv_tcp_t)
 local function start_server(inst, tcp)
@@ -559,32 +352,25 @@ local function start_server(inst, tcp)
     end)
 end
 
-
 ------------------------------------------------------------
--- Public server API
+-- Server API
 ------------------------------------------------------------
 
--- cfg: { port, root, default_index|nil, headers, live={enabled,inject_script,debounce}, features={dirlist={enabled,show_hidden}}, host, token, protected_paths, asset_root }
 function S.start(cfg)
     local tcp = uv.new_tcp()
     if tcp == nil then
         error("failed to create a new tcp socket")
     end
 
-    local debounce_timer = uv.new_timer()
-    if debounce_timer == nil then
-        error("failed to create timer")
-    end
-
     local host = cfg.host or "127.0.0.1"
-    local ok, bind_err = pcall(function() tcp:bind(host, cfg.port) end)
+    local port = 0
+
+    local ok, bind_err = pcall(function() tcp:bind(host, port) end)
     if not ok then error(bind_err or "bind failed") end
 
-    -- Resolve actual port (needed when cfg.port == 0 for OS-assigned port)
+    -- Resolve actual port (pass in port as 0, get the OS-assigned port)
     local actual_port = cfg.port
-    if cfg.port == 0 then
-        actual_port = tcp:getsockname().port
-    end
+    actual_port = tcp:getsockname().port
 
     local root_real = uv.fs_realpath(cfg.root)
     if not root_real then error("Invalid root: " .. tostring(cfg.root)) end
@@ -606,20 +392,12 @@ function S.start(cfg)
         started_at        = os.time(),
 
         -- live
-        live_enabled      = cfg.live and cfg.live.enabled ~= false,
-        inject_script     = cfg.live and cfg.live.inject_script ~= false,
         live_debounce     = (cfg.live and cfg.live.debounce) or 120,
-        css_inject        = cfg.live and cfg.live.css_inject ~= false,
         clients           = {},
         on_message        = cfg.on_message,
-        debounce_timer    = debounce_timer,
 
         -- features
-        dir_enabled       = not (cfg.features and cfg.features.dirlist and cfg.features.dirlist.enabled == false),
-        dir_show_hidden   = cfg.features and cfg.features.dirlist and cfg.features.dirlist.show_hidden or false,
         index_names       = cfg.index_names or { "index.html", "index.htm" },
-        ignore_patterns   = util.parse_liveignore(root_real),
-        notify_on_reload  = cfg.notify_on_reload or false,
 
         -- auth
         token             = cfg.token, -- nil = no auth; string = required on protected paths
@@ -633,68 +411,34 @@ function S.start(cfg)
         extra_asset_roots = cfg.extra_asset_roots
     }
 
-
-    if inst.live_enabled then start_fs_watch(inst) end
-
     local ok, bind_err = pcall(start_server, inst, tcp)
     if not ok then error(bind_err or "listen failed") end
 
     return inst
 end
 
-
 function S.stop(inst)
-    if inst.debounce_timer then pcall(function()
-        inst.debounce_timer:stop()
-        inst.debounce_timer:close()
-    end) end
     for _, cl in ipairs(inst.clients) do pcall(function() cl:close() end) end
     inst.clients = {}
-    stop_fs_watch(inst)
     pcall(function() inst.handle:close() end)
 end
-
 
 function S.update_target(inst, new_root, new_index)
     inst.root = new_root
     inst.root_real = uv.fs_realpath(new_root) or inst.root_real
     inst.default_index = new_index
-    inst.ignore_patterns = util.parse_liveignore(inst.root_real)
-    if inst.live_enabled then start_fs_watch(inst) end
 end
-
 
 -- Live-reload controls
 ---@type fun(inst: ServerInstance, reason_path: string)
 function S.reload(inst, reason_path)
     local rp = tostring(reason_path or "")
-    local is_css = inst.css_inject and rp:match("%.css$")
     ws.broadcast(inst, {
         type = "reload",
         ts = (":%d"):format(os.time()),
         path = rp,
-        css = is_css
     })
-    if inst.notify_on_reload then
-        vim.schedule(function()
-            util.notify(("Reload%s → %s"):format(is_css and " (CSS)" or "", rp ~= "" and rp or "manual"),
-            { notify = true })
-        end)
-    end
 end
-
-
-function S.enable_live(inst, enable)
-    enable = not not enable
-    if inst.live_enabled == enable then return enable end
-    inst.live_enabled = enable
-    if enable then start_fs_watch(inst) else stop_fs_watch(inst) end
-    return enable
-end
-
-
-function S.is_live_enabled(inst) return inst.live_enabled end
-
 
 function S.connected_client_count(inst) return #inst.clients end
 
