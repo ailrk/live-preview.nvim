@@ -1,0 +1,27 @@
+graph TD
+    subgraph Prep ["1. Feedstock Preparation & Purification"]
+        NG[Natural Gas / Methane] --> Desulf[Desulfurization]
+        Desulf --> SMR[Steam Methane Reforming]
+        Air[Air Source] --> SecRef[Secondary Reforming / Air Separation]
+        SMR --> Shift[Water-Gas Shift Reaction]
+        SecRef --> Shift
+        Shift --> Purif[CO & CO₂ Removal <br/> Scrubbing / PSA]
+    end
+
+    subgraph Loop ["2. Haber-Bosch Synthesis Loop"]
+        Purif --> Comp[High-Pressure Compressor <br/> 150 - 250 atm]
+        Comp --> Reactor[Catalytic Reactor <br/> Iron Catalyst, 400°C - 500°C]
+        Reactor --> Effluent[Reactor Output: NH₃, N₂, H₂]
+    end
+
+    subgraph Separation ["3. Condensation & Product Separation"]
+        Effluent --> Condenser[Refrigeration / Condenser]
+        Condenser --> Liquid[Liquid Ammonia Product <br/> To Storage]
+        Condenser --> Recycle[Unreacted N₂ & H₂ Gases]
+        Recycle --> Comp
+    end
+
+    %% Styling
+    style Prep fill:#f4f6f9,stroke:#333,stroke-width:1px
+    style Loop fill:#eaf4fc,stroke:#333,stroke-width:1px
+    style Separation fill:#edf7ed,stroke:#333,stroke-width:1px
