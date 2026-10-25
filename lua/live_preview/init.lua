@@ -28,13 +28,8 @@ M.config = {
 
 	overwrite_index_on_start = true,
 
-	auto_refresh_events = { "InsertLeave", "TextChanged", "TextChangedI", "BufWritePost" },
+	refresh_events = { "InsertLeave", "TextChanged", "TextChangedI", "BufWritePost" },
 	debounce_ms = 300,
-	notify_on_refresh = false,
-
-	-- "js" = browser-side mermaid.js (default, zero deps)
-	-- "rust" = pre-render via mermaid-rs-renderer (mmdr) CLI (~400x faster)
-	mermaid_renderer = "js",
 
 	-- Load ELK layout engine for mermaid diagrams (requires internet; adds ~800 KB).
 	-- Enables %%{init: {"layout": "elk"}}%% in diagrams.
@@ -219,138 +214,6 @@ local function extract_mermaid_under_cursor(bufnr)
 end
 
 ---------------------------------------------------------------------------
--- mermaid-rs-renderer (mmdr) integration
----------------------------------------------------------------------------
-
----Check if mmdr CLI is available; caches result after first probe.
----@return boolean
-local function is_mmdr_available()
-	if M._mmdr_available ~= nil then
-		return M._mmdr_available
-	end
-	M._mmdr_available = vim.fn.executable("mmdr") == 1
-	if not M._mmdr_available then
-		vim.notify(
-			"Markdown Preview: mermaid_renderer='rust' but `mmdr` not found in PATH.\n"
-				.. "Install: cargo install mermaid-rs-renderer\n"
-				.. "Falling back to browser-side mermaid.js.",
-			vim.log.levels.WARN
-		)
-	end
-	return M._mmdr_available
-end
-
----Render a single mermaid diagram source via mmdr CLI.
----@param source string Raw mermaid diagram text
----@return string|nil svg SVG string on success
----@return string|nil err Error message on failure
-local function render_mermaid_via_mmdr(source)
-	local result = vim.fn.system({ "mmdr", "-e", "svg" }, source)
-	if vim.v.shell_error ~= 0 then
-		return nil, result
-	end
-	return result, nil
-end
-
--- Expand button SVG used in pre-rendered blocks (matches browser-side fence renderer)
-local EXPAND_BTN_SVG = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none">'
-	.. '<path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>'
-	.. "</svg>"
-
-local function count_newlines(s)
-	local _, n = s:gsub("\n", "")
-	return n
-end
-
----Pre-render ```mermaid fences via mmdr, replacing them with HTML blocks.
----Failed renders leave the original fence untouched for browser-side fallback.
----The replacement keeps the SAME number of lines as the original fence, so
----line numbers in content.md still match the nvim buffer (cursor sync).
----@param text string Full markdown text
----@return string text Markdown with pre-rendered mermaid blocks
-local function prerender_mermaid_blocks(text)
-	local rust_idx = 0
-	local out = {}
-	local pos = 1
-
-	while true do
-		-- Find opening ```mermaid fence
-		local fence_start, fence_end = text:find("\n```mermaid%s*\n", pos)
-		if not fence_start then
-			-- Also check at the very start of the document
-			if pos == 1 then
-				fence_start, fence_end = text:find("^```mermaid%s*\n")
-			end
-			if not fence_start then
-				break
-			end
-		end
-
-		-- Find closing ```
-		local close_start, close_end = text:find("\n```%s*\n", fence_end)
-		if not close_start then
-			-- Try closing at end of file
-			close_start, close_end = text:find("\n```%s*$", fence_end)
-			if not close_start then
-				break
-			end
-		end
-
-		-- Extract mermaid source between fences
-		local source = text:sub(fence_end + 1, close_start - 1)
-		if source and #source > 0 then
-			local svg, _err = render_mermaid_via_mmdr(source)
-			if svg then
-				rust_idx = rust_idx + 1
-				local block_id = "mmd-rust-" .. rust_idx
-				local encoded = vim.uri_encode(source, "rfc2396")
-
-				-- Collapse newlines inside the SVG: a multi-line (or blank-line
-				-- containing) SVG would both end the HTML block early and
-				-- change the line count.
-				svg = svg:gsub("\r?\n", " ")
-
-				local html_block = '<div class="mermaid-block mermaid-rendered" id="'
-					.. block_id
-					.. '" data-mermaid-source="'
-					.. encoded
-					.. '" data-graph="mermaid" data-prerendered="true">'
-					.. '<button class="mermaid-expand-btn" title="Expand diagram" data-expand="'
-					.. block_id
-					.. '">'
-					.. EXPAND_BTN_SVG
-					.. "</button>"
-					.. '<div class="mermaid-svg-wrap">'
-					.. svg
-					.. "</div>"
-					.. "</div>"
-
-				-- Preserve line count: replacement is "\n" .. block .. "\n" (2 newlines),
-				-- so pad with however many newlines the original segment had beyond that.
-				local original = text:sub(fence_start, close_end)
-				local pad = math.max(0, count_newlines(original) - 2)
-
-				-- Append text before fence + the HTML block
-				out[#out + 1] = text:sub(pos, fence_start - 1)
-				out[#out + 1] = "\n" .. html_block .. "\n" .. string.rep("\n", pad)
-				pos = close_end + 1
-			else
-				-- mmdr failed for this block — leave fence untouched for JS fallback
-				out[#out + 1] = text:sub(pos, close_end)
-				pos = close_end + 1
-			end
-		else
-			out[#out + 1] = text:sub(pos, close_end)
-			pos = close_end + 1
-		end
-	end
-
-	-- Append remaining text
-	out[#out + 1] = text:sub(pos)
-	return table.concat(out)
-end
-
----------------------------------------------------------------------------
 -- Content writing (unified: markdown or mermaid)
 ---------------------------------------------------------------------------
 
@@ -375,14 +238,6 @@ local function get_content(bufnr)
 		-- Other filetypes: extract mermaid block under cursor, wrap in code fence
 		local mermaid_text = extract_mermaid_under_cursor(bufnr)
 		text = "```mermaid\n" .. mermaid_text .. "\n```\n"
-	end
-
-	-- Pre-render mermaid blocks via mmdr if configured. Skipped when raw HTML
-	-- is disabled: pre-rendering injects <svg> markup into content.md, which
-	-- markdown-it would escape to literal text under html:false. The browser-
-	-- side renderer handles the fences instead (it doesn't need raw HTML).
-	if M.config.mermaid_renderer == "rust" and M.config.allow_raw_html ~= false and is_mmdr_available() then
-		text = prerender_mermaid_blocks(text)
 	end
 
 	return text
@@ -419,7 +274,7 @@ end
 -- Refresh logic
 ---------------------------------------------------------------------------
 
-local function maybe_refresh(bufnr, silent)
+local function maybe_refresh(bufnr)
 	bufnr = bufnr or vim.api.nvim_get_current_buf()
 
 	local text = get_content_safe(bufnr)
@@ -440,9 +295,6 @@ local function maybe_refresh(bufnr, silent)
 		pcall(ls_server.reload, M._server_instance, M.config.content_name)
 	end
 
-	if not silent and M.config.notify_on_refresh then
-		vim.notify("Markdown preview updated", vim.log.levels.INFO)
-	end
 	return true
 end
 
@@ -454,7 +306,7 @@ local function debounced_refresh(bufnr)
     --- condition. (maybe_refresh refreshes to the old bufnr)
     vim.defer_fn(function()
         if this_call ~= M._debounce_seq or bufnr ~= M._active_bufnr then return end
-        pcall(maybe_refresh, bufnr, true)
+        pcall(maybe_refresh, bufnr)
     end, M.config.debounce_ms)
 end
 
@@ -587,7 +439,7 @@ local function set_autocmds_for_buffer(bufnr)
 	end
 	M._augroup = vim.api.nvim_create_augroup("MarkdownPreviewAuto", { clear = true })
 
-    for _, ev in ipairs(M.config.auto_refresh_events) do
+    for _, ev in ipairs(M.config.refresh_events) do
         vim.api.nvim_create_autocmd(ev, {
             group = M._augroup,
             buffer = bufnr,
@@ -789,7 +641,7 @@ end
 
 function M.refresh()
 	local bufnr = vim.api.nvim_get_current_buf()
-	local changed = maybe_refresh(bufnr, false)
+	local changed = maybe_refresh(bufnr)
 	if not changed and M.config.notify_on_refresh then
 		vim.notify("Markdown Preview: no changes detected", vim.log.levels.INFO)
 	end
