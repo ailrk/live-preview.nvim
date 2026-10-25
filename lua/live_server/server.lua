@@ -29,6 +29,7 @@ local S = {}
 ---@field token string?
 ---@field protected_paths string[]
 ---@field asset_root string|fun():string?|nil
+---@field extra_asset_roots string[]
 ---@field fs_event uv.uv_fs_event_t?
 ---@field _fs_events table<string, uv.uv_fs_event_t>?
 
@@ -380,16 +381,21 @@ local function serve_path(inst, sock, abs_path, req_path, extra_headers)
 end
 
 ------------------------------------------------------------
--- Server
+--- Server
 ------------------------------------------------------------
 
 ---@type fun(inst: ServerInstance, sock: uv.uv_tcp_t): fun()
 local function on_request(inst, sock)
     return function(err_read, chunk)
+        ----------------------------------------
+        --- guarding
+        ----------------------------------------
+
         if err_read then
             sock:close()
             return
         end
+
         if not chunk then
             sock:close()
             return
@@ -400,6 +406,10 @@ local function on_request(inst, sock)
         if req.method ~= "GET" then
             return http.send_response(sock, 405, { ["content-type"] = "text/plain" }, "Method Not Allowed")
         end
+
+        ----------------------------------------
+        --- token endpoint
+        ----------------------------------------
 
         -- Canonicalize the path once; auth matching, endpoint dispatch,
         -- and file mapping all use this same string so an encoded or
@@ -444,12 +454,18 @@ local function on_request(inst, sock)
             end
         end
 
-        -- Special endpoints
-        -- TODO need to fix for ws
+        ------------------------------
+        --- Websocket
+        ------------------------------
+
         if path_only == "/__live/ws" then
             ws.accept(inst, sock, req.headers)
             return
         end
+
+        ------------------------------
+        --- Asset
+        ------------------------------
 
         if path_only == "/__live/asset" then
             local aroot = inst.asset_root
@@ -462,20 +478,40 @@ local function on_request(inst, sock)
             -- Relative paths only: reject absolute paths, drive
             -- letters / URL schemes (':'), and backslashes outright;
             -- realpath containment below handles '..' traversal.
+            -- extra_asset_roots will be permitted.
             if not aroot or rel == "" or rel:find("^/") or rel:find(":") or rel:find("\\") then
                 return http.http_404(sock, "/__live/asset")
             end
             local aroot_real = uv.fs_realpath(aroot)
+            local allowed = { aroot_real }
+
+            for _, extra in ipairs(inst.extra_asset_roots or {}) do
+                local r = uv.fs_realpath(extra)
+                if r then table.insert(allowed, r) end
+            end
+
+            local function under_allowed(p)
+                for _, root in ipairs(allowed) do
+                    if util.path_has_prefix(p, root) then return true end
+                end
+                return false
+            end
+
             if not aroot_real then return http.http_404(sock, "/__live/asset") end
             local ok_real, real = pcall(uv.fs_realpath, util.joinpath(aroot_real, rel))
-            if not ok_real or not real then
+
+            if not ok_real or not real or not under_allowed(real) then
                 return http.http_404(sock, "/__live/asset")
             end
 
             return stream_file(sock, real, inst.headers)
         end
 
-        -- Map path
+        ------------------------------
+        --- Serving
+        ------------------------------
+
+        --- Map path
         local mapped = sanitize_and_map(path_only, inst.root_real)
         if not mapped then return http.http_404(sock, req.path) end
 
@@ -510,7 +546,6 @@ end
 
 ---@type fun(inst: ServerInstance, tcp: uv.uv_tcp_t)
 local function start_server(inst, tcp)
-    print("[TODO] starting live server...")
     tcp:listen(128, function(err_listen)
         if err_listen then return end
 
@@ -561,40 +596,41 @@ function S.start(cfg)
 
     ---@type ServerInstance
     local inst = {
-        handle           = tcp,
-        port             = actual_port,
-        host             = host,
-        root             = cfg.root,
-        root_real        = root_real,
-        default_index    = cfg.default_index,
-        headers          = headers,
-        started_at       = os.time(),
+        handle            = tcp,
+        port              = actual_port,
+        host              = host,
+        root              = cfg.root,
+        root_real         = root_real,
+        default_index     = cfg.default_index,
+        headers           = headers,
+        started_at        = os.time(),
 
         -- live
-        live_enabled     = cfg.live and cfg.live.enabled ~= false,
-        inject_script    = cfg.live and cfg.live.inject_script ~= false,
-        live_debounce    = (cfg.live and cfg.live.debounce) or 120,
-        css_inject       = cfg.live and cfg.live.css_inject ~= false,
-        clients          = {},
-        on_message       = cfg.on_message,
-        debounce_timer   = debounce_timer,
+        live_enabled      = cfg.live and cfg.live.enabled ~= false,
+        inject_script     = cfg.live and cfg.live.inject_script ~= false,
+        live_debounce     = (cfg.live and cfg.live.debounce) or 120,
+        css_inject        = cfg.live and cfg.live.css_inject ~= false,
+        clients           = {},
+        on_message        = cfg.on_message,
+        debounce_timer    = debounce_timer,
 
         -- features
-        dir_enabled      = not (cfg.features and cfg.features.dirlist and cfg.features.dirlist.enabled == false),
-        dir_show_hidden  = cfg.features and cfg.features.dirlist and cfg.features.dirlist.show_hidden or false,
-        index_names      = cfg.index_names or { "index.html", "index.htm" },
-        ignore_patterns  = util.parse_liveignore(root_real),
-        notify_on_reload = cfg.notify_on_reload or false,
+        dir_enabled       = not (cfg.features and cfg.features.dirlist and cfg.features.dirlist.enabled == false),
+        dir_show_hidden   = cfg.features and cfg.features.dirlist and cfg.features.dirlist.show_hidden or false,
+        index_names       = cfg.index_names or { "index.html", "index.htm" },
+        ignore_patterns   = util.parse_liveignore(root_real),
+        notify_on_reload  = cfg.notify_on_reload or false,
 
         -- auth
-        token            = cfg.token,            -- nil = no auth; string = required on protected paths
-        protected_paths  = cfg.protected_paths or {},
+        token             = cfg.token, -- nil = no auth; string = required on protected paths
+        protected_paths   = cfg.protected_paths or {},
 
         -- /__live/asset root: a directory, or a function returning one.
         -- Lets a caller expose files that live next to its source document
         -- (e.g. images referenced from markdown) without serving that
         -- directory as the root. Token-gated whenever token is set.
-        asset_root       = cfg.asset_root,
+        asset_root        = cfg.asset_root,
+        extra_asset_roots = cfg.extra_asset_roots
     }
 
 

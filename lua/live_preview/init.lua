@@ -9,10 +9,10 @@ local M = {}
 
 
 M.config = {
-    -- 0 = auto; effective port depends on instance_mode
+	-- 0 = auto (the OS picks a free port)
 	port = 0,
 
-    -- bind address; "0.0.0.0" for network access (e.g. over SSH)
+	-- bind address; "0.0.0.0" for network access (e.g. over SSH)
 	host = "127.0.0.1",
 	open_browser = true,
 
@@ -20,10 +20,6 @@ M.config = {
 	-- "google-chrome"). Table for full command with args (URL is appended).
 	-- On macOS, string values are passed via `open -a <name>`.
 	browser = nil,
-
-	-- "takeover" = shared workspace + fixed port, one browser tab across instances
-	-- "multi" = per-instance server + browser tab (port 0 recommended)
-	instance_mode = "takeover",
 
 	content_name = "content.md",
 	index_name = "index.html",
@@ -54,6 +50,9 @@ M.config = {
 
 	-- "dark" or "light"; determines the initial theme of the preview page
 	default_theme = "light",
+
+	-- Extra asset roots (symlink targets / directories images may be served from).
+	extra_asset_roots = {},
 
 	-- Render raw HTML embedded in markdown (GitHub-like). Set false when
 	-- previewing untrusted markdown: raw HTML runs inside the preview page.
@@ -93,20 +92,10 @@ M._server_instance = nil
 M._debounce_seq = 0
 M._workspace_dir = nil
 M._mmdr_available = nil -- nil = unchecked, true/false after probe
+M._token = nil          -- live-server auth token (one per server lifetime)
 
 ---@type {line:integer, col:integer, mode:string, text:string}|nil
 M._last_cursor = nil
-
-M._is_primary = nil      -- true/false/nil (takeover mode)
-M._takeover_port = nil   -- port of primary server (secondary uses for HTTP events)
-M._token = nil           -- live-server auth token (primary owns; secondaries read from lockfile)
-
-
-local function effective_port()
-	if M.config.port ~= 0 then return M.config.port end
-	if M.config.instance_mode == "takeover" then return 8421 end
-	return 0
-end
 
 
 local function host_is_loopback()
@@ -143,33 +132,38 @@ local function write_index(dir)
 	end
 	local content = util.read_text(src)
 
-    local style_css = util.resolve_asset("assets/style.css")
-    if not style_css then
-        error("Cound not locate assets/style.css")
-    end
+	local style_css = util.resolve_asset("assets/style.css")
+	if not style_css then
+		error("Could not locate assets/style.css")
+	end
 
-    local main_js = util.resolve_asset("assets/main.js")
-    if not main_js then
-        error("Cound not locate assets/main.js")
-    end
-
+	local main_js = util.resolve_asset("assets/main.js")
+	if not main_js then
+		error("Could not locate assets/main.js")
+	end
 
 	-- gsub with function replacement: avoids the "%n is a capture reference"
 	-- escape problem if any substituted value contains '%'.
 	content = content:gsub("__BOTTOM_PADDING__", function() return tostring(M.config.bottom_padding) end)
 	content = content:gsub("__MERMAID_ELK__", function() return M.config.mermaid_elk and "true" or "false" end)
-	content = content:gsub("__STYLE_CSS__", util.read_text(style_css))
-	content = content:gsub("__MAIN_JS__", util.read_text(main_js))
+	content = content:gsub("__STYLE_CSS__", function() return util.read_text(style_css) end)
+	content = content:gsub("__MAIN_JS__", function() return util.read_text(main_js) end)
 
 	-- Anchor to the attribute: index.html also contains the bare placeholder
 	-- as a JS sentinel, and substituting that too breaks auth (issue #31).
 	-- Bake the token only on loopback binds: on a network bind the index is
 	-- served to any peer that can reach the port, and a baked token would
 	-- defeat the auth entirely (the browser gets it via ?t= instead).
-	content = content:gsub('data%-live%-token="__LIVE_TOKEN__"', function() return 'data-live-token="' .. (host_is_loopback() and M._token or "") .. '"' end)
+	content = content:gsub('data%-live%-token="__LIVE_TOKEN__"', function()
+		return 'data-live-token="' .. (host_is_loopback() and M._token or "") .. '"'
+	end)
 	content = content:gsub("__THEME__", function() return M.config.default_theme end)
 	content = content:gsub("__ALLOW_HTML__", function() return M.config.allow_raw_html ~= false and "true" or "false" end)
-	content = content:gsub("__YAML_MODE__", function() local m = M.config.yaml_mode if m ~= "hide" and m ~= "raw" then m = "panel" end return m end)
+	content = content:gsub("__YAML_MODE__", function()
+		local m = M.config.yaml_mode
+		if m ~= "hide" and m ~= "raw" then m = "panel" end
+		return m
+	end)
 
 	-- Inline custom CSS after the bundled styles so user rules win the cascade.
 	if M.config.custom_css and M.config.custom_css ~= "" then
@@ -210,7 +204,7 @@ local function write_index_if_needed(dir)
 end
 
 ---------------------------------------------------------------------------
--- Content writing (unified: markdown or mermaid)
+-- Mermaid extraction
 ---------------------------------------------------------------------------
 
 local function extract_mermaid_under_cursor_strict(bufnr)
@@ -374,7 +368,6 @@ end
 -- Content writing (unified: markdown or mermaid)
 ---------------------------------------------------------------------------
 
-
 ---Get the content to write based on filetype.
 ---Markdown buffers: entire buffer.
 ---Mermaid files (.mmd, .mermaid): entire buffer wrapped in mermaid fence.
@@ -388,7 +381,7 @@ local function get_content(bufnr)
 		local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 		text = table.concat(lines, "\n")
 	elseif vim.api.nvim_buf_get_name(bufnr):match("%.mmd$")
-        or vim.api.nvim_buf_get_name(bufnr):match("%.mermaid$") then
+		or vim.api.nvim_buf_get_name(bufnr):match("%.mermaid$") then
 		-- .mmd / .mermaid files: treat entire buffer as mermaid
 		local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 		text = "```mermaid\n" .. table.concat(lines, "\n") .. "\n```\n"
@@ -426,9 +419,8 @@ local function write_content(dir, text, bufnr)
 	local path = vim.fs.joinpath(dir, M.config.content_name)
 	util.write_text(path, text)
 	-- Sidecar recording the source file's directory. The server's asset
-	-- route resolves relative image paths against it; using a file (rather
-	-- than server state) lets takeover secondaries retarget it by simply
-	-- writing into the shared workspace.
+	-- route resolves relative image paths against it, and re-reads it per
+	-- request so buffer switches retarget it.
 	if bufnr then
 		local name = vim.api.nvim_buf_get_name(bufnr)
 		local src_dir = name ~= "" and vim.fs.dirname(name) or nil
@@ -462,7 +454,6 @@ local function maybe_refresh(bufnr, silent)
 	M._last_text_by_buf[bufnr] = text
 
 	-- Notify live-server of the content change for immediate SSE push
-	-- In secondary takeover mode, M._server_instance is nil — fs_watch handles reload
 	if M._server_instance then
 		pcall(ls_server.reload, M._server_instance, M.config.content_name)
 	end
@@ -630,68 +621,17 @@ function M.start()
 	M._active_bufnr = bufnr
 	M._last_cursor = nil -- force the first cursor message after (re)start
 
-	-- Takeover coordination (lock probe + cross-instance events) talks to
-	-- 127.0.0.1, which a specific-interface bind does not answer on. Only
-	-- loopback and the wildcard are supported there; multi mode has no such
-	-- coupling and accepts any bind address.
-	if M.config.instance_mode == "takeover" and not host_is_loopback() and M.config.host ~= "0.0.0.0" then
-		vim.notify(
-			'Markdown Preview: takeover mode supports host = "127.0.0.1" or "0.0.0.0" only.\n'
-				.. 'Use "0.0.0.0" for LAN access, or instance_mode = "multi" to bind a specific interface.',
-			vim.log.levels.ERROR
-		)
-		return
-	end
-
 	local ok_content, text = pcall(get_content, bufnr)
 	if not ok_content then
 		vim.notify("Markdown Preview: " .. tostring(text), vim.log.levels.ERROR)
 		return
 	end
 
-	-- Resolve workspace: shared (takeover) or per-buffer (multi)
-	local dir
-	if M.config.instance_mode == "takeover" then
-		dir = util.shared_workspace()
-	else
-		dir = ensure_workspace(bufnr)
-	end
-	util.mkdirp(dir)
+	local dir = ensure_workspace(bufnr)
 	M._workspace_dir = dir
 
-	-- Decide role + token BEFORE writing index.html. The index bakes the
-	-- token in via the __LIVE_TOKEN__ placeholder, so we need it ready.
-	if M.config.instance_mode == "takeover" and not M._server_instance then
-		local lock = require("live_preview.lock")
-		local lock_data = lock.read()
-		if lock_data and lock.is_server_alive(lock_data.port) then
-			-- Secondary: server is already running in another Neovim
-			-- instance. Adopt its token so our scroll-sync RPC works.
-			M._is_primary = false
-			M._takeover_port = lock_data.port
-			M._token = lock_data.token
-			write_content(dir, text, bufnr)
-			M._last_text_by_buf[bufnr] = text
-			set_autocmds_for_buffer(bufnr)
-			if M.config.scroll_sync then
-				vim.notify(
-					"Markdown Preview: another Neovim instance owns the preview server on port "
-						.. tostring(lock_data.port)
-						.. ".\nContent updates work, but cursor sync is only available from that instance.",
-					vim.log.levels.WARN
-				)
-			end
-			if type(M.config.hooks.on_start) == "function" then
-				M.config.hooks.on_start(browser_url(lock_data.port))
-			end
-			return
-		end
-		-- Stale lock or no lock, we become primary
-		lock.remove()
-	end
-
-	-- Primary path (takeover) or single-instance (multi). Generate a token
-	-- once per server lifetime and reuse it across retargets.
+	-- One token per server lifetime, reused across retargets. Must exist
+	-- before writing index.html, which bakes it in via __LIVE_TOKEN__.
 	if not M._token or M._token == "" then
 		M._token = ls_util.random_token(16)
 	end
@@ -731,12 +671,11 @@ function M.start()
 		)
 	end
 
-	-- Start live-server if not already running
+	local index_path = vim.fs.joinpath(dir, M.config.index_name)
+
 	if not M._server_instance then
-		local port = effective_port()
-		local index_path = vim.fs.joinpath(dir, M.config.index_name)
 		local ok, inst = pcall(ls_server.start, {
-			port = port,
+			port = M.config.port,
 			host = M.config.host,
 			root = dir,
 			default_index = index_path,
@@ -756,8 +695,8 @@ function M.start()
 			token = M._token,
 			protected_paths = protected,
 			-- Resolve relative image paths against the source file's dir
-			-- (issue #17). Read per request so takeover secondaries and
-			-- buffer switches retarget it via the sidecar.
+			-- (issue #17). Read per request so buffer switches retarget it
+			-- via the sidecar.
 			asset_root = function()
 				local ws = M._workspace_dir
 				if not ws then return nil end
@@ -765,22 +704,16 @@ function M.start()
 				if not ok_read or not data or data == "" then return nil end
 				return (data:gsub("%s+$", ""))
 			end,
+			extra_asset_roots = M.config.extra_asset_roots,
 		})
 		if not ok then
 			vim.notify(
-				("Markdown Preview: failed to start server (port %s) — %s"):format(tostring(port), tostring(inst)),
+				("Markdown Preview: failed to start server (port %s) — %s"):format(tostring(M.config.port), tostring(inst)),
 				vim.log.levels.ERROR
 			)
 			return
 		end
 		M._server_instance = inst
-		M._is_primary = true
-		M._takeover_port = nil
-
-		-- Write lock file in takeover mode
-		if M.config.instance_mode == "takeover" then
-			require("live_preview.lock").write(inst.port, dir, M._token)
-		end
 
 		if type(M.config.hooks.on_start) == "function" then
 			M.config.hooks.on_start(browser_url(inst.port))
@@ -792,8 +725,7 @@ function M.start()
 			end, 200)
 		end
 	else
-		-- Server already running, retarget to this buffer's workspace
-		local index_path = vim.fs.joinpath(dir, M.config.index_name)
+		-- Server already running in this nvim: retarget to this buffer's workspace
 		pcall(ls_server.update_target, M._server_instance, dir, index_path)
 		pcall(ls_server.reload, M._server_instance, M.config.content_name)
 
@@ -833,13 +765,8 @@ function M.stop()
 		pcall(ls_server.stop, M._server_instance)
 		M._server_instance = nil
 	end
-	if M._is_primary then
-		require("live_preview.lock").remove()
-	end
 	M._workspace_dir = nil
 	M._last_cursor = nil
-	M._is_primary = nil
-	M._takeover_port = nil
 	M._token = nil
 
 	if type(M.config.hooks.on_stop) == "function" then
