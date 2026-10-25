@@ -481,7 +481,7 @@ async function sync(initial = false) {
 }
 
 
-/* ----- Precise cursor sync ----- */
+/* ----- Cursor sync (nvim -> browser) ----- */
 const utf8enc = new TextEncoder(), utf8dec = new TextDecoder();
 
 // nvim sends a byte column; JS strings are UTF-16.
@@ -579,8 +579,8 @@ function caretRectAt(nodes, offset, wantWidth) {
     return { x, y, h, w };
 }
 
-// Table row: pick the cell by pipe position.
-function rowTarget(tr, s, col) {
+// [start, end) source ranges of each cell in a table row line.
+function tableSegs(s) {
     const pipes = [];
     for (let i = 0; i < s.length; i++) if (s[i] === '|' && s[i - 1] !== '\\') pipes.push(i);
     const segs = [];
@@ -589,6 +589,12 @@ function rowTarget(tr, s, col) {
     segs.push([prev + 1, s.length]);
     if (pipes.length && s.slice(0, pipes[0]).trim() === '') segs.shift();
     if (s.trimEnd().endsWith('|')) segs.pop();
+    return segs;
+}
+
+// Table row: pick the cell by pipe position.
+function rowTarget(tr, s, col) {
+    const segs = tableSegs(s);
     let idx = segs.findIndex(sg => col <= sg[1]);
     if (idx < 0) idx = segs.length - 1;
     idx = Math.max(0, Math.min(idx, tr.children.length - 1));
@@ -707,6 +713,160 @@ function placeCursor(data, { scroll = true } = {}) {
     if (scroll) window.scrollTo({ top: Math.max(0, py - window.innerHeight / 2) });
 }
 
+/* ----- Cursor Sync (browser -> nvim) ----- */
+function sendToNvim(obj) {
+    if (sock && sock.readyState === WebSocket.OPEN) {
+        sock.send(JSON.stringify(obj));
+    }
+}
+
+// Caret position under a client point. caretPositionFromPoint is the
+// standard API (CSSOM View); the old caretRangeFromPoint fallback is gone.
+function caretAt(x, y) {
+    const p = document.caretPositionFromPoint(x, y);
+    return p ? { node: p.offsetNode, offset: p.offset } : null;
+}
+
+// A caret lands between characters, but nvim's cursor sits ON a character.
+// If the pointer is over the character just before the caret (right half
+// of it), use that one so the cursor lands where the user clicked.
+function charUnderPoint(x, y) {
+    const c = caretAt(x, y);
+    if (!c || c.node.nodeType !== Node.TEXT_NODE || c.offset === 0) return c;
+    const r = document.createRange();
+    r.setStart(c.node, c.offset - 1);
+    r.setEnd(c.node, c.offset);
+    for (const b of r.getClientRects()) {
+        if (x >= b.left && x < b.right && y >= b.top && y <= b.bottom) {
+            return { node: c.node, offset: c.offset - 1 };
+        }
+    }
+    return c;
+}
+
+// Rendered characters before (node, offset) within a block's own text nodes.
+// null = the caret isn't inside one of them.
+function renderedOffsetIn(nodes, node, offset) {
+    let acc = 0;
+    for (const n of nodes) {
+        if (n === node) return acc + Math.min(offset, n.nodeValue.length);
+        acc += n.nodeValue.length;
+    }
+    return null;
+}
+
+// Inverse of visibleLen: the source column of the (target+1)th rendered
+// character. visibleLen never decreases as `end` grows, so the largest k
+// with visibleLen(s, k) <= target is the character itself, not the markup
+// (`**`, `[`...) in front of it.
+function sourceColFor(s, target, blockMarkers = true) {
+    for (let k = s.length; k > 0; k--) {
+        if (visibleLen(s, k, blockMarkers) <= target) return k;
+    }
+    return 0;
+}
+
+// (block element, caret) -> { line, col } in content.md; col is UTF-16.
+function sourcePosFor(hit, node, offset) {
+    const s = +hit.dataset.sourceLine, e = +hit.dataset.sourceEnd;
+    const L = (l) => srcLines[l] || '';
+    const none = { line: s, col: 0 };
+
+    // Diagrams and whole tables: jump to the first line.
+    if (hit.classList.contains('mermaid-block') || hit.tagName === 'TABLE') return none;
+
+    if (hit.tagName === 'TR') {
+        const el = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+        const cell = el && el.closest('td, th');
+        if (!cell || !hit.contains(cell)) return none;
+        const off = renderedOffsetIn(textNodesOf(cell), node, offset) ?? 0;
+        const cur = L(s);
+        const segs = tableSegs(cur);
+        const idx = Math.max(0, Math.min([...hit.children].indexOf(cell), segs.length - 1));
+        const [a, b] = segs[idx] || [0, cur.length];
+        const raw = cur.slice(a, b);
+        const lead = raw.length - raw.trimStart().length;
+        return { line: s, col: a + lead + sourceColFor(raw.trimStart(), off, false) };
+    }
+
+    const off = renderedOffsetIn(textNodesOf(hit), node, offset) ?? 0;
+
+    if (hit.dataset.kind === 'code') {
+        // Mirrors the code branch of locateCursor: content lines sit between
+        // the fences, minus the fence's indentation.
+        const closing = e - 1 > s && /^\s*(`{3,}|~{3,})\s*$/.test(L(e - 1));
+        const lastContent = closing ? e - 2 : e - 1;
+        const indent = (L(s).match(/^\s*/) || [''])[0].length;
+        const strip = (l) => Math.min(indent, (L(l).match(/^\s*/) || [''])[0].length);
+        let remaining = off;
+        for (let l = s + 1; l <= lastContent; l++) {
+            const len = L(l).length - strip(l);
+            if (remaining <= len || l === lastContent) {
+                return { line: l, col: strip(l) + Math.min(remaining, len) };
+            }
+            remaining -= len + 1; // +1 for the newline
+        }
+        return none;
+    }
+
+    // Paragraphs, headings, list items, blockquotes: walk the source lines,
+    // subtracting each line's rendered length (+1 for the line break).
+    let remaining = off;
+    for (let l = s; l < e; l++) {
+        const vl = visibleLen(L(l).trimEnd());
+        if (remaining <= vl || l === e - 1) {
+            return { line: l, col: sourceColFor(L(l), Math.min(remaining, vl)) };
+        }
+        remaining -= vl + 1;
+    }
+    return none;
+}
+
+// Tell nvim, and draw the cursor locally. nvim does not echo this move back
+// (the echo would re-centre the page under the mouse), so the browser has to
+// move its own cursor.
+function jumpNvimTo(line, col) {
+    const text = srcLines[line] ?? '';
+    const byteCol = utf8enc.encode(text.slice(0, col)).length; // nvim wants bytes
+    sendToNvim({ type: 'goto', line, col: byteCol });
+    lastScrollData = {
+        line,
+        col: byteCol,
+        mode: lastScrollData?.mode ?? 'n',
+        text,
+        total: lastScrollData?.total ?? srcLines.length,
+    };
+    placeCursor(lastScrollData, { scroll: false });
+}
+
+contentEl.addEventListener('click', (e) => {
+    // No cursor message from nvim yet (or scroll_sync is off): stay inert.
+    if (e.button !== 0 || !lastScrollData) return;
+    if (!window.getSelection().isCollapsed) return; // user is selecting text
+    if (e.target.closest('a, button, summary, input, textarea, select, [data-expand]')) return;
+
+    const caret = charUnderPoint(e.clientX, e.clientY);
+    const useCaret = !!caret && contentEl.contains(caret.node);
+    const node = useCaret ? caret.node : e.target;
+    const el = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+    const hit = el && el.closest('[data-source-line]');
+
+    let pos;
+    if (hit) {
+        pos = sourcePosFor(hit, node, useCaret ? caret.offset : 0);
+    } else {
+        // Raw HTML blocks and pre-rendered mermaid carry no source range:
+        // fall back to the nearest tagged block above the click.
+        let above = null;
+        for (const b of contentEl.querySelectorAll('[data-source-line]')) {
+            if (b.getBoundingClientRect().top > e.clientY) break;
+            above = b;
+        }
+        if (!above) return;
+        pos = { line: +above.dataset.sourceLine, col: 0 };
+    }
+    jumpNvimTo(pos.line, pos.col);
+});
 
 /* ----- Websocket ----- */
 function connectWS() {
@@ -754,8 +914,6 @@ function connectWS() {
     });
 }
 
-
-
 /* ----- Expand overlay (fullscreen diagram zoom/pan) ----- */
 function openOverlay(svgHtml) {
     ovSvgSource = svgHtml;
@@ -780,12 +938,10 @@ function openOverlay(svgHtml) {
     updateOverlayFitBtns();
 }
 
-
 function closeOverlay() {
     overlay.classList.remove('active');
     overlayPanzoomInner.innerHTML = '';
 }
-
 
 function applyOverlayZoom() {
     const svg = overlayPanzoomInner.querySelector('svg');
@@ -798,7 +954,6 @@ function applyOverlayZoom() {
     ovZoomReset.textContent = Math.round(ovZoom * 100) + '%';
 }
 
-
 function updateOverlayFit() {
     if (!ovBaseW || !ovBaseH) return;
     const cw = overlayPanzoom.clientWidth || ovBaseW;
@@ -809,19 +964,16 @@ function updateOverlayFit() {
     applyOverlayZoom();
 }
 
-
 function updateOverlayFitBtns() {
     ovFitWidth.style.borderColor = ovFitMode === 'width' ? 'var(--accent)' : '';
     ovFitHeight.style.borderColor = ovFitMode === 'height' ? 'var(--accent)' : '';
 }
-
 
 ovZoomIn.addEventListener('click', () => { ovFitMode = 'none'; ovZoom *= 1.2; applyOverlayZoom(); updateOverlayFitBtns(); });
 ovZoomOut.addEventListener('click', () => { ovFitMode = 'none'; ovZoom /= 1.2; applyOverlayZoom(); updateOverlayFitBtns(); });
 ovZoomReset.addEventListener('click', () => { ovFitMode = 'none'; ovZoom = 1; applyOverlayZoom(); updateOverlayFitBtns(); });
 ovFitWidth.addEventListener('click', () => { ovFitMode = ovFitMode === 'width' ? 'none' : 'width'; updateOverlayFit(); updateOverlayFitBtns(); });
 ovFitHeight.addEventListener('click', () => { ovFitMode = ovFitMode === 'height' ? 'none' : 'height'; updateOverlayFit(); updateOverlayFitBtns(); });
-
 
 // Overlay pan (drag)
 overlayPanzoom.addEventListener('mousedown', (e) => {
@@ -836,7 +988,6 @@ window.addEventListener('mousemove', (e) => {
 });
 window.addEventListener('mouseup', () => { ovDragging = false; overlayPanzoom.classList.remove('dragging'); });
 
-
 // Overlay wheel zoom
 overlayPanzoom.addEventListener('wheel', (e) => {
     if (e.ctrlKey || e.metaKey) {
@@ -847,7 +998,6 @@ overlayPanzoom.addEventListener('wheel', (e) => {
         updateOverlayFitBtns();
     }
 }, { passive: false });
-
 
 // Export SVG from overlay
 ovExport.addEventListener('click', () => {
@@ -860,7 +1010,6 @@ ovExport.addEventListener('click', () => {
     setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 });
 
-
 // Close overlay
 ovClose.addEventListener('click', closeOverlay);
 document.addEventListener('keydown', (e) => {
@@ -868,7 +1017,6 @@ document.addEventListener('keydown', (e) => {
         closeOverlay();
     }
 });
-
 
 // Resize handler for overlay fit
 let ovResizeTimer = null;
@@ -894,19 +1042,16 @@ contentEl.addEventListener('click', (e) => {
     if (svg) openOverlay(svg);
 });
 
-
 // Re-place the cursor when layout shifts (images loading, window resize, etc.)
 new ResizeObserver(() => {
     if (lastScrollData) placeCursor(lastScrollData, { scroll: !scrollSyncPaused });
 }).observe(contentEl);
 
-
-// ── Bottom padding ────────────────────────────────────────────
+// Bottom padding
 function applyBottomPadding() {
     contentEl.style.paddingBottom = `${(1 - BOTTOM_PADDING) * window.innerHeight}px`;
 }
 window.addEventListener('resize', applyBottomPadding);
-
 
 /* ----- Main ----- */
 (async function main() {

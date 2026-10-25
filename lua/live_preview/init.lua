@@ -92,6 +92,7 @@ M._debounce_seq = 0
 M._workspace_dir = nil
 M._mmdr_available = nil -- nil = unchecked, true/false after probe
 M._token = nil          -- live-server auth token (one per server lifetime)
+M._follow_augroup = nil --
 
 ---@type {line:integer, col:integer, mode:string, text:string}|nil
 M._last_cursor = nil
@@ -477,7 +478,7 @@ end
 
 
 ---------------------------------------------------------------------------
--- Cursor sync
+-- Cursor sync (nvim -> browser)
 ---------------------------------------------------------------------------
 
 -- Line offset between the nvim buffer and content.md.
@@ -528,14 +529,70 @@ local function send_cursor_sync(bufnr, force)
 	end
 end
 
+---------------------------------------------------------------------------
+-- Cursor sync (browser -> nvim)
+---------------------------------------------------------------------------
+
+---Move the cursor in the previewed buffer to a position sent by the browser.
+---@param msg table {line: number (0-based, content.md), col: number (0-based BYTE col)}
+local function goto_position(msg)
+	if not M.config.scroll_sync then return end
+
+	local bufnr = M._active_bufnr
+	if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then return end
+
+	-- Same mapping as nvim -> browser sync (nil = extracted mermaid block, no mapping)
+	local offset = content_line_offset(bufnr)
+	if not offset then return end
+
+	-- The message comes from the browser: validate everything.
+	if type(msg.line) ~= "number" or msg.line ~= msg.line then return end
+
+	-- Only move the cursor if the buffer is visible somewhere.
+	local win = vim.fn.bufwinid(bufnr)
+	if win == -1 then return end
+
+	local count = vim.api.nvim_buf_line_count(bufnr)
+	local lnum = math.max(1, math.min(count, math.floor(msg.line) - offset + 1))
+	local text = vim.api.nvim_buf_get_lines(bufnr, lnum - 1, lnum, false)[1] or ""
+
+	local col = type(msg.col) == "number" and msg.col == msg.col and math.floor(msg.col) or 0
+	col = math.max(0, math.min(math.max(#text - 1, 0), col))
+
+	-- Snap to the start of a multibyte character.
+	if col > 0 and vim.str_utf_start then
+		local ok, back = pcall(vim.str_utf_start, text, col + 1)
+		if ok and type(back) == "number" then col = col + back end
+	end
+
+	if not pcall(vim.api.nvim_win_set_cursor, win, { lnum, col }) then return end
+
+	-- Pre-seed the dedupe state used by send_cursor_sync, so the CursorMoved
+	-- event this triggers is not echoed back to the browser (which would
+	-- scroll the page under the user's mouse).
+	M._last_cursor = {
+		line = lnum,
+		col = col,
+		mode = vim.api.nvim_get_mode().mode,
+		text = text,
+	}
+
+	-- nvim may not be the focused window; make sure the move is drawn.
+	pcall(vim.cmd, "redraw")
+end
+
 
 -- Handle messages sent by the browser over the websocket.
 -- Runs in a libuv callback, so hop onto the main loop before touching nvim.
 local function on_browser_message(raw)
 	vim.schedule(function()
 		local ok, msg = pcall(vim.json.decode, raw)
-		if ok and type(msg) == "table" and msg.type == "hello" then
+		if not ok or type(msg) ~= "table" then return end
+
+		if msg.type == "hello" then
 			send_cursor_sync(M._active_bufnr, true)
+		elseif msg.type == "goto" then
+			goto_position(msg)
 		end
 	end)
 end
@@ -583,6 +640,30 @@ local function set_autocmds_for_buffer(bufnr)
 	})
 end
 
+
+local function set_follow_autocmd()
+	if M._follow_augroup then
+		pcall(vim.api.nvim_del_augroup_by_id, M._follow_augroup)
+	end
+	M._follow_augroup = vim.api.nvim_create_augroup("MarkdownPreviewFollow", { clear = true })
+
+	vim.api.nvim_create_autocmd("BufEnter", {
+		group = M._follow_augroup,
+		callback = function(args)
+			local bufnr = args.buf
+			if bufnr == M._active_bufnr then return end
+			if vim.bo[bufnr].buftype ~= "" then return end   -- skip help, terminals, etc.
+			if content_line_offset(bufnr) == nil then return end -- only markdown / .mmd / .mermaid
+			-- Run after the buffer switch settles; start() reads the current buffer.
+			vim.schedule(function()
+				if vim.api.nvim_get_current_buf() == bufnr then
+					M.start()
+				end
+			end)
+		end,
+		desc = "Markdown Preview: follow the current markdown buffer",
+	})
+end
 
 ---------------------------------------------------------------------------
 -- Public API
@@ -637,6 +718,7 @@ function M.start()
 	M._last_text_by_buf[bufnr] = text
 
 	set_autocmds_for_buffer(bufnr)
+    set_follow_autocmd()
 
 	-- Patterns matching workspace-served files that require ?t=<token>.
 	-- vim.pesc escapes every Lua-pattern magic char, so custom content_name /
@@ -760,6 +842,10 @@ function M.stop()
 	if M._server_instance then
 		pcall(ls_server.stop, M._server_instance)
 		M._server_instance = nil
+	end
+	if M._follow_augroup then
+		pcall(vim.api.nvim_del_augroup_by_id, M._follow_augroup)
+		M._follow_augroup = nil
 	end
 	M._workspace_dir = nil
 	M._last_cursor = nil

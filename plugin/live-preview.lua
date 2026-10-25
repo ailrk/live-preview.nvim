@@ -6,6 +6,7 @@ vim.g.loaded_live_preview = true
 
 -- User commands
 vim.api.nvim_create_user_command("LivePreview", function()
+	require("live_preview").stop()
 	require("live_preview").start()
 end, {})
 
