@@ -44,13 +44,13 @@ Defaults shown for the common ones:
   open_browser = true,
   browser = nil,             -- app name, or a command table
   default_theme = "light",   -- "light" | "dark"
-  scroll_sync = true,        -- cursor sync, both directions
-  mermaid_renderer = "js",   -- "rust" pre-renders with mmdr
+  cursor_sync = true,        -- cursor sync, both directions
   allow_raw_html = true,     -- false for untrusted markdown
   yaml_mode = "panel",       -- "panel" | "hide" | "raw"
   custom_css = "",           -- path to a CSS file
   extra_asset_roots = {},    -- extra dirs images may be served from
   debounce_ms = 300,         -- debounce interval
+  bottom_padding = 0.5,      -- 0.5 = middle of viewport, 1.0 = bottom edge
 }
 ```
 
