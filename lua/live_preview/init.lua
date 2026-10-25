@@ -564,6 +564,7 @@ end
 -- Handle messages sent by the browser over the websocket. Runs in a libuv
 -- callback.
 local function on_browser_message(raw)
+    print("WS <-: " .. raw)
 	vim.schedule(function()
 		local ok, msg = pcall(vim.json.decode, raw)
 		if not ok or type(msg) ~= "table" then return end

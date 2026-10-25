@@ -868,8 +868,8 @@ function connectWS() {
     sock.addEventListener('close', () => {
         wsConnected = false;
         setConnectionState('error');
-        console.log('[live-preview] WebSocket disconnected. Reconnecting in 2s...');
-        setTimeout(connectWS, 2000); // Auto-reconnect safety net
+        console.log('[live-preview] WebSocket disconnected. Reconnecting in 0.2s...');
+        setTimeout(connectWS, 200); // Auto-reconnect safety net
     });
 
     sock.addEventListener('error', () => {
@@ -943,9 +943,9 @@ function applyBottomPadding() {
  * Main
  ************************************************************/
 
+
 (async function main() {
     try {
-        connectWS();
         // Apply theme
         themeBtn.addEventListener('click', () => {
             applyTheme(currentTheme === 'dark' ? 'light' : 'dark');
@@ -1090,5 +1090,5 @@ function applyBottomPadding() {
         showContent();
         contentEl.innerHTML = '<p style="color:var(--err-fg)">Error: ' + (e.message || e) + '</p>';
     }
-
+    connectWS();
 })();
