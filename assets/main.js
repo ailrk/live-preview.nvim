@@ -1,27 +1,11 @@
 import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
 import markdownItGithubAlerts from 'https://unpkg.com/markdown-it-github-alerts@1.0.1/dist/index.mjs';
 
+/************************************************************
+ * Constants
+ ************************************************************/
+
 const BOTTOM_PADDING = parseFloat(document.documentElement.dataset.bottomPadding) || 0.5;
-
-/* ----- DOM ----- */
-const $ = (id) => document.getElementById(id);
-const contentEl = $('content');
-const statusEl = $('status');
-const themeBtn = $('themeBtn');
-const statusDot = $('statusDot');
-const loadingSkeleton = $('loadingSkeleton');
-
-// Overlay refs
-const overlay = $('overlay');
-const overlayPanzoom = $('overlay-panzoom');
-const overlayPanzoomInner = $('overlay-panzoom-inner');
-const ovZoomIn = $('ovZoomIn');
-const ovZoomOut = $('ovZoomOut');
-const ovZoomReset = $('ovZoomReset');
-const ovFitWidth = $('ovFitWidth');
-const ovFitHeight = $('ovFitHeight');
-const ovExport = $('ovExport');
-const ovClose = $('ovClose');
 
 // SVG paths for theme icons
 const MOON_SVG = '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>';
@@ -30,15 +14,6 @@ const SUN_SVG = '<circle cx="12" cy="12" r="5" stroke="currentColor" stroke-widt
 // SVG icons for copy button
 const COPY_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><rect x="9" y="9" width="13" height="13" rx="2" stroke="currentColor" stroke-width="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" stroke="currentColor" stroke-width="2"/></svg>';
 const CHECK_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M20 6 9 17l-5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-
-/* ----- State ----- */
-let lastContent = null;
-let currentTheme = document.documentElement.dataset.theme || 'dark';
-let mermaidIdCounter = 0;
-let wsConnected = false;
-let sock = null;
-let srcLines = [];
-const loadedPacks = new Set();
 
 // Live-reload auth token. Either substituted into the document by
 // live-preview.nvim at file-write time, or passed via ?t=<token>
@@ -61,6 +36,40 @@ const LIVE_TOKEN = (() => {
     try { return sessionStorage.getItem('mdp-token') || ''; } catch (_) { return ''; }
 })();
 
+const YAML_MODE = document.documentElement.dataset.yamlMode || 'panel';
+
+/************************************************************
+ * DOM Elements
+ ************************************************************/
+const $ = (id) => document.getElementById(id);
+const contentEl = $('content');
+const statusEl = $('status');
+const themeBtn = $('themeBtn');
+const statusDot = $('statusDot');
+const loadingSkeleton = $('loadingSkeleton');
+
+// Overlay refs
+const overlay = $('overlay');
+const overlayPanzoom = $('overlay-panzoom');
+const overlayPanzoomInner = $('overlay-panzoom-inner');
+const ovZoomIn = $('ovZoomIn');
+const ovZoomOut = $('ovZoomOut');
+const ovZoomReset = $('ovZoomReset');
+const ovFitWidth = $('ovFitWidth');
+const ovFitHeight = $('ovFitHeight');
+const ovExport = $('ovExport');
+const ovClose = $('ovClose');
+
+/************************************************************
+ * Global States
+ ************************************************************/
+let lastContent = null;
+let currentTheme = document.documentElement.dataset.theme || 'dark';
+let mermaidIdCounter = 0;
+let wsConnected = false;
+let sock = null;
+let srcLines = [];
+const loadedPacks = new Set();
 
 const withToken = (url) => {
     if (!LIVE_TOKEN) return url;
@@ -72,24 +81,23 @@ let scrollSyncPaused = false;
 let scrollSyncPauseTimer = null;
 let lastScrollData = null;
 
-// Pause scroll sync briefly when user scrolls the browser manually
-window.addEventListener('wheel', () => {
-    scrollSyncPaused = true;
-    clearTimeout(scrollSyncPauseTimer);
-    scrollSyncPauseTimer = setTimeout(() => { scrollSyncPaused = false; }, 3000);
-}, { passive: true });
-window.addEventListener('touchmove', () => {
-    scrollSyncPaused = true;
-    clearTimeout(scrollSyncPauseTimer);
-    scrollSyncPauseTimer = setTimeout(() => { scrollSyncPaused = false; }, 3000);
-}, { passive: true });
-
 // Overlay state
 let ovSvgSource = '';
 let ovBaseW = 0, ovBaseH = 0;
 let ovZoom = 1;
 let ovFitMode = 'width';
 let ovDragging = false, ovStartX = 0, ovStartY = 0, ovStartL = 0, ovStartT = 0;
+
+// Markdownit
+let md = null;
+let capturedFrontMatter = null;
+
+// Utfc codec
+const utf8enc = new TextEncoder(), utf8dec = new TextDecoder();
+
+/************************************************************
+ * Utils
+ ************************************************************/
 
 const setStatus = (t) => { if (statusEl) statusEl.textContent = t || ''; };
 const nowTime = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -104,7 +112,10 @@ function showContent() {
     contentEl.style.display = '';
 }
 
-/* ----- Theme ----- */
+/************************************************************
+ * Theme
+ ************************************************************/
+
 function applyTheme(theme) {
     currentTheme = theme;
     document.documentElement.setAttribute('data-theme', theme);
@@ -123,67 +134,124 @@ function applyTheme(theme) {
     });
 }
 
-themeBtn.addEventListener('click', () => {
-    applyTheme(currentTheme === 'dark' ? 'light' : 'dark');
-    renderAllMermaidBlocks();
-});
+/************************************************************
+ * Markdown-it
+ ************************************************************/
 
-/* ----- Markdown-it setup ----- */
-if (!window.markdownit) {
-    console.error('[live-preview] markdown-it not loaded from CDN');
-    showContent();
-    contentEl.innerHTML = '<p style="color:var(--err-fg)">Failed to load markdown-it from CDN. Check your internet connection.</p>';
-}
-const md = (window.markdownit || function () { return { render: (t) => '<pre>' + t + '</pre>', utils: { escapeHtml: (s) => s } }; })({
-    // Raw HTML passthrough is configurable: untrusted markdown can
-    // otherwise inject handlers/scripts into this page. Defaults to
-    // enabled (GitHub-like) when the attribute is absent.
-    html: document.documentElement.dataset.allowHtml !== 'false',
-    linkify: true,
-    typographer: true,
-    highlight: function (str, lang) {
-        if (lang && lang.toLowerCase() === 'mermaid') {
-            const encoded = encodeURIComponent(str);
-            return `<div class="mermaid-block" data-mermaid-source="${encoded}"><div class="mermaid-svg-wrap"><p style="color:var(--fg-muted);font-size:.85rem">Rendering diagram&hellip;</p></div></div>`;
-        }
-        if (lang && window.hljs && window.hljs.getLanguage(lang)) {
-            try {
-                return '<pre class="hljs" data-lang="' + md.utils.escapeHtml(lang) + '"><code>' +
-                    window.hljs.highlight(str, { language: lang, ignoreIllegals: true }).value +
-                    '</code></pre>';
-            } catch (_) { }
-        }
-        const langAttr = lang ? ' data-lang="' + md.utils.escapeHtml(lang) + '"' : '';
-        return '<pre class="hljs"' + langAttr + '><code>' + md.utils.escapeHtml(str) + '</code></pre>';
+function setupMarkdownit() {
+    if (!window.markdownit) {
+        console.error('[live-preview] markdown-it not loaded from CDN');
+        showContent();
+        contentEl.innerHTML = '<p style="color:var(--err-fg)">Failed to load markdown-it from CDN. Check your internet connection.</p>';
     }
-});
-
-/* ----- Front matter -----
- * Inline block rule; the CDN build of markdown-it-front-matter is
- * CJS-only and never registered in a browser. Captured YAML goes to
- * the #fm-panel <details> (mode "panel") or is dropped ("hide");
- * mode "raw" skips the rule so the text renders as ordinary markdown.
- */
-const YAML_MODE = document.documentElement.dataset.yamlMode || 'panel';
-let capturedFrontMatter = null;
-if (YAML_MODE !== 'raw') {
-    md.block.ruler.before('table', 'front_matter', function (state, startLine, endLine, silent) {
-        if (startLine !== 0 || state.blkIndent !== 0) return false;
-        if (state.src.slice(state.bMarks[0], state.eMarks[0]) !== '---') return false;
-        let closed = -1;
-        for (let next = startLine + 1; next < endLine; next++) {
-            if (state.tShift[next] > 0) continue;
-            const line = state.src.slice(state.bMarks[next], state.eMarks[next]);
-            if (/^-{3,}\s*$/.test(line)) { closed = next; break; }
+    md = (window.markdownit || function () { return { render: (t) => '<pre>' + t + '</pre>', utils: { escapeHtml: (s) => s } }; })({
+        // Raw HTML passthrough is configurable: untrusted markdown can
+        // otherwise inject handlers/scripts into this page. Defaults to
+        // enabled (GitHub-like) when the attribute is absent.
+        html: document.documentElement.dataset.allowHtml !== 'false',
+        linkify: true,
+        typographer: true,
+        highlight: function (str, lang) {
+            if (lang && lang.toLowerCase() === 'mermaid') {
+                const encoded = encodeURIComponent(str);
+                return `<div class="mermaid-block" data-mermaid-source="${encoded}"><div class="mermaid-svg-wrap"><p style="color:var(--fg-muted);font-size:.85rem">Rendering diagram&hellip;</p></div></div>`;
+            }
+            if (lang && window.hljs && window.hljs.getLanguage(lang)) {
+                try {
+                    return '<pre class="hljs" data-lang="' + md.utils.escapeHtml(lang) + '"><code>' +
+                        window.hljs.highlight(str, { language: lang, ignoreIllegals: true }).value +
+                        '</code></pre>';
+                } catch (_) { }
+            }
+            const langAttr = lang ? ' data-lang="' + md.utils.escapeHtml(lang) + '"' : '';
+            return '<pre class="hljs"' + langAttr + '><code>' + md.utils.escapeHtml(str) + '</code></pre>';
         }
-        // Unlike upstream, bail out when unclosed: while the fence is
-        // still being typed, consuming to EOF would blank the preview.
-        if (closed < 0) return false;
-        if (silent) return true;
-        capturedFrontMatter = state.src.slice(state.bMarks[1], state.bMarks[closed]);
-        state.line = closed + 1;
-        return true;
-    }, { alt: ['paragraph', 'reference', 'blockquote', 'list'] });
+    });
+
+    // Inline block rule; the CDN build of markdown-it-front-matter is
+    // CJS-only and never registered in a browser. Captured YAML goes to
+    // the #fm-panel <details> (mode "panel") or is dropped ("hide");
+    // mode "raw" skips the rule so the text renders as ordinary markdown.
+    if (YAML_MODE !== 'raw') {
+        md.block.ruler.before('table', 'front_matter', function (state, startLine, endLine, silent) {
+            if (startLine !== 0 || state.blkIndent !== 0) return false;
+            if (state.src.slice(state.bMarks[0], state.eMarks[0]) !== '---') return false;
+            let closed = -1;
+            for (let next = startLine + 1; next < endLine; next++) {
+                if (state.tShift[next] > 0) continue;
+                const line = state.src.slice(state.bMarks[next], state.eMarks[next]);
+                if (/^-{3,}\s*$/.test(line)) { closed = next; break; }
+            }
+            // Unlike upstream, bail out when unclosed: while the fence is
+            // still being typed, consuming to EOF would blank the preview.
+            if (closed < 0) return false;
+            if (silent) return true;
+            capturedFrontMatter = state.src.slice(state.bMarks[1], state.bMarks[closed]);
+            state.line = closed + 1;
+            return true;
+        }, { alt: ['paragraph', 'reference', 'blockquote', 'list'] });
+    }
+
+    // Register plugins
+    md.use(markdownItGithubAlerts);
+    if (window.markdownitEmoji) md.use(window.markdownitEmoji);
+    if (window.markdownitFootnote) md.use(window.markdownitFootnote);
+    if (window.markdownitTaskLists) md.use(window.markdownitTaskLists, { enabled: false });
+    if (window.markdownItAnchor) {
+        md.use(window.markdownItAnchor, {
+            permalink: false,
+            slugify: (s) => s.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^\w-]/g, ''),
+        });
+    }
+
+    // LaTeX math via KaTeX + texmath
+    if (window.texmath && window.katex) {
+        md.use(window.texmath, {
+            engine: window.katex,
+            delimiters: ['dollars', 'beg_end'],
+        });
+    }
+
+    md.renderer.rules.paragraph_open = injectLineNumbers;
+    md.renderer.rules.heading_open = injectLineNumbers;
+    md.renderer.rules.list_item_open = injectLineNumbers;
+    md.renderer.rules.table_open = injectLineNumbers;
+    md.renderer.rules.tr_open = injectLineNumbers;
+    md.renderer.rules.blockquote_open = injectLineNumbers;
+
+    // Override fence renderer to handle mermaid specially
+    const defaultFence = md.renderer.rules.fence;
+    md.renderer.rules.fence = function (tokens, idx, options, env, self) {
+        const token = tokens[idx];
+        const info = token.info ? token.info.trim().toLowerCase() : '';
+        const lineAttr = token.map
+            ? ` data-source-line="${token.map[0]}" data-source-end="${token.map[1]}"`
+            : '';
+        if (info === 'mermaid') {
+            const encoded = encodeURIComponent(token.content);
+            const stableId = 'mmd-' + idx;
+            return `<div class="mermaid-block source-line"${lineAttr} id="${stableId}" data-mermaid-source="${encoded}" data-graph="mermaid">` +
+                `<button class="mermaid-expand-btn" title="Expand diagram" data-expand="${stableId}">` +
+                `<svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>` +
+                `</button>` +
+                `<div class="mermaid-svg-wrap"><p style="color:var(--fg-muted);font-size:.85rem">Rendering&hellip;</p></div>` +
+                `</div>`;
+        }
+        let html;
+        if (defaultFence) {
+            html = defaultFence(tokens, idx, options, env, self);
+        } else {
+            html = self.renderToken(tokens, idx, options);
+        }
+        if (lineAttr) html = html.replace(/^<pre\b/, `<pre${lineAttr} data-kind="code"`);
+        // Wrap in a non-scrolling container so the language badge and the
+        // copy button stay pinned while the <pre> scrolls horizontally.
+        // Emitted here rather than in a DOM pass so morphdom's virtual
+        // tree matches the live tree and code blocks patch in place.
+        const langMatch = html.match(/^<pre[^>]*\bdata-lang="([^"]*)"/);
+        const badge = langMatch ? `<span class="code-lang">${langMatch[1]}</span>` : '';
+        return `<div class="code-wrap">${badge}${html}</div>`;
+    };
 }
 
 function updateFrontMatterPanel() {
@@ -198,26 +266,6 @@ function updateFrontMatterPanel() {
     }
 }
 
-// Register plugins
-md.use(markdownItGithubAlerts);
-if (window.markdownitEmoji) md.use(window.markdownitEmoji);
-if (window.markdownitFootnote) md.use(window.markdownitFootnote);
-if (window.markdownitTaskLists) md.use(window.markdownitTaskLists, { enabled: false });
-if (window.markdownItAnchor) {
-    md.use(window.markdownItAnchor, {
-        permalink: false,
-        slugify: (s) => s.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^\w-]/g, ''),
-    });
-}
-
-// LaTeX math via KaTeX + texmath
-if (window.texmath && window.katex) {
-    md.use(window.texmath, {
-        engine: window.katex,
-        delimiters: ['dollars', 'beg_end'],
-    });
-}
-
 // Line number injection for cursor sync. Records the full source range.
 function injectLineNumbers(tokens, idx, options, env, slf) {
     const t = tokens[idx];
@@ -228,49 +276,11 @@ function injectLineNumbers(tokens, idx, options, env, slf) {
     }
     return slf.renderToken(tokens, idx, options, env, slf);
 }
-md.renderer.rules.paragraph_open = injectLineNumbers;
-md.renderer.rules.heading_open = injectLineNumbers;
-md.renderer.rules.list_item_open = injectLineNumbers;
-md.renderer.rules.table_open = injectLineNumbers;
-md.renderer.rules.tr_open = injectLineNumbers;
-md.renderer.rules.blockquote_open = injectLineNumbers;
-
-// Override fence renderer to handle mermaid specially
-const defaultFence = md.renderer.rules.fence;
-md.renderer.rules.fence = function (tokens, idx, options, env, self) {
-    const token = tokens[idx];
-    const info = token.info ? token.info.trim().toLowerCase() : '';
-    const lineAttr = token.map
-        ? ` data-source-line="${token.map[0]}" data-source-end="${token.map[1]}"`
-        : '';
-    if (info === 'mermaid') {
-        const encoded = encodeURIComponent(token.content);
-        const stableId = 'mmd-' + idx;
-        return `<div class="mermaid-block source-line"${lineAttr} id="${stableId}" data-mermaid-source="${encoded}" data-graph="mermaid">` +
-            `<button class="mermaid-expand-btn" title="Expand diagram" data-expand="${stableId}">` +
-            `<svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>` +
-            `</button>` +
-            `<div class="mermaid-svg-wrap"><p style="color:var(--fg-muted);font-size:.85rem">Rendering&hellip;</p></div>` +
-            `</div>`;
-    }
-    let html;
-    if (defaultFence) {
-        html = defaultFence(tokens, idx, options, env, self);
-    } else {
-        html = self.renderToken(tokens, idx, options);
-    }
-    if (lineAttr) html = html.replace(/^<pre\b/, `<pre${lineAttr} data-kind="code"`);
-    // Wrap in a non-scrolling container so the language badge and the
-    // copy button stay pinned while the <pre> scrolls horizontally.
-    // Emitted here rather than in a DOM pass so morphdom's virtual
-    // tree matches the live tree and code blocks patch in place.
-    const langMatch = html.match(/^<pre[^>]*\bdata-lang="([^"]*)"/);
-    const badge = langMatch ? `<span class="code-lang">${langMatch[1]}</span>` : '';
-    return `<div class="code-wrap">${badge}${html}</div>`;
-};
 
 
-/* ----- Iconify auto-detection ---- */
+/************************************************************
+ * Iconify auto-detection
+ ************************************************************/
 function detectPacks(src) {
     const re = /\b([a-z0-9-]+):[a-z0-9-]+\b/gi;
     const s = new Set();
@@ -278,7 +288,6 @@ function detectPacks(src) {
     while ((m = re.exec(src))) s.add(m[1].toLowerCase());
     return [...s];
 }
-
 
 async function ensurePack(name) {
     if (loadedPacks.has(name)) return;
@@ -290,9 +299,10 @@ async function ensurePack(name) {
 }
 
 
-/* ----- Mermaid rendering ----- */
+/************************************************************
+ * Mermaid Rendering
+ ************************************************************/
 const lastGoodSvg = {};
-
 
 async function renderMermaidBlock(block) {
     const source = decodeURIComponent(block.dataset.mermaidSource || '');
@@ -342,13 +352,15 @@ async function renderAllMermaidBlocks() {
     }
 }
 
-/* ----- Copy button on code blocks -----
+/************************************************************
+ * Copy button on code blocks
  * Relative image paths resolve against the served workspace, which
  * only contains the rendered content — rewrite them to the token-
  * gated asset route, which resolves against the source file's dir.
  * Runs on the detached render tree BEFORE morphdom applies it, so
  * raw-HTML <img> tags never fire an unrewritten (404) request.
- */
+ *************************************************************/
+
 function rewriteRelativeImages(rootEl) {
     rootEl.querySelectorAll('img[src]').forEach(img => {
         const src = img.getAttribute('src');
@@ -356,7 +368,6 @@ function rewriteRelativeImages(rootEl) {
         img.setAttribute('src', withToken('/__live/asset?p=' + encodeURIComponent(src)));
     });
 }
-
 
 function attachCopyButtons() {
     contentEl.querySelectorAll('.code-wrap').forEach(wrap => {
@@ -385,8 +396,9 @@ function attachCopyButtons() {
     });
 }
 
-
-/* ----- Content sync ----- */
+/************************************************************
+ * Sync content.md
+ ************************************************************/
 async function fetchContent() {
     try {
         const resp = await fetch(withToken('content.md?ts=' + Date.now()), { cache: 'no-store' });
@@ -405,7 +417,6 @@ async function fetchContent() {
         return null;
     }
 }
-
 
 async function sync(initial = false) {
     const text = await fetchContent();
@@ -457,9 +468,11 @@ async function sync(initial = false) {
                 },
             });
         } else {
+            // Fallback to full page update
             contentEl.innerHTML = html;
             rewriteRelativeImages(contentEl);
         }
+
         applyBottomPadding();
 
         const blocks = contentEl.querySelectorAll('.mermaid-block[data-mermaid-source]:not(.mermaid-rendered)');
@@ -480,9 +493,9 @@ async function sync(initial = false) {
     }
 }
 
-
-/* ----- Cursor sync (nvim -> browser) ----- */
-const utf8enc = new TextEncoder(), utf8dec = new TextDecoder();
+/************************************************************
+ * Sync cursor (nvim <-> browser)
+ ************************************************************/
 
 // nvim sends a byte column; JS strings are UTF-16.
 function byteColToUtf16(text, byteCol) {
@@ -713,7 +726,6 @@ function placeCursor(data, { scroll = true } = {}) {
     if (scroll) window.scrollTo({ top: Math.max(0, py - window.innerHeight / 2) });
 }
 
-/* ----- Cursor Sync (browser -> nvim) ----- */
 function sendToNvim(obj) {
     if (sock && sock.readyState === WebSocket.OPEN) {
         sock.send(JSON.stringify(obj));
@@ -839,36 +851,9 @@ function jumpNvimTo(line, col) {
     placeCursor(lastScrollData, { scroll: false });
 }
 
-contentEl.addEventListener('click', (e) => {
-    // No cursor message from nvim yet (or scroll_sync is off): stay inert.
-    if (e.button !== 0 || !lastScrollData) return;
-    if (!window.getSelection().isCollapsed) return; // user is selecting text
-    if (e.target.closest('a, button, summary, input, textarea, select, [data-expand]')) return;
-
-    const caret = charUnderPoint(e.clientX, e.clientY);
-    const useCaret = !!caret && contentEl.contains(caret.node);
-    const node = useCaret ? caret.node : e.target;
-    const el = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
-    const hit = el && el.closest('[data-source-line]');
-
-    let pos;
-    if (hit) {
-        pos = sourcePosFor(hit, node, useCaret ? caret.offset : 0);
-    } else {
-        // Raw HTML blocks and pre-rendered mermaid carry no source range:
-        // fall back to the nearest tagged block above the click.
-        let above = null;
-        for (const b of contentEl.querySelectorAll('[data-source-line]')) {
-            if (b.getBoundingClientRect().top > e.clientY) break;
-            above = b;
-        }
-        if (!above) return;
-        pos = { line: +above.dataset.sourceLine, col: 0 };
-    }
-    jumpNvimTo(pos.line, pos.col);
-});
-
-/* ----- Websocket ----- */
+/************************************************************
+ * Websocket
+ ************************************************************/
 function connectWS() {
     const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = withToken(`${wsProtocol}//${location.host}/__live/ws`);
@@ -914,7 +899,9 @@ function connectWS() {
     });
 }
 
-/* ----- Expand overlay (fullscreen diagram zoom/pan) ----- */
+/************************************************************
+ * Expand Overlay (fullscreen diagram zoom/pan)
+ ************************************************************/
 function openOverlay(svgHtml) {
     ovSvgSource = svgHtml;
     overlayPanzoomInner.innerHTML = svgHtml;
@@ -969,93 +956,149 @@ function updateOverlayFitBtns() {
     ovFitHeight.style.borderColor = ovFitMode === 'height' ? 'var(--accent)' : '';
 }
 
-ovZoomIn.addEventListener('click', () => { ovFitMode = 'none'; ovZoom *= 1.2; applyOverlayZoom(); updateOverlayFitBtns(); });
-ovZoomOut.addEventListener('click', () => { ovFitMode = 'none'; ovZoom /= 1.2; applyOverlayZoom(); updateOverlayFitBtns(); });
-ovZoomReset.addEventListener('click', () => { ovFitMode = 'none'; ovZoom = 1; applyOverlayZoom(); updateOverlayFitBtns(); });
-ovFitWidth.addEventListener('click', () => { ovFitMode = ovFitMode === 'width' ? 'none' : 'width'; updateOverlayFit(); updateOverlayFitBtns(); });
-ovFitHeight.addEventListener('click', () => { ovFitMode = ovFitMode === 'height' ? 'none' : 'height'; updateOverlayFit(); updateOverlayFitBtns(); });
-
-// Overlay pan (drag)
-overlayPanzoom.addEventListener('mousedown', (e) => {
-    ovDragging = true; overlayPanzoom.classList.add('dragging');
-    ovStartX = e.clientX; ovStartY = e.clientY;
-    ovStartL = overlayPanzoom.scrollLeft; ovStartT = overlayPanzoom.scrollTop;
-});
-window.addEventListener('mousemove', (e) => {
-    if (!ovDragging) return;
-    overlayPanzoom.scrollLeft = ovStartL - (e.clientX - ovStartX);
-    overlayPanzoom.scrollTop = ovStartT - (e.clientY - ovStartY);
-});
-window.addEventListener('mouseup', () => { ovDragging = false; overlayPanzoom.classList.remove('dragging'); });
-
-// Overlay wheel zoom
-overlayPanzoom.addEventListener('wheel', (e) => {
-    if (e.ctrlKey || e.metaKey) {
-        e.preventDefault();
-        ovFitMode = 'none';
-        ovZoom *= e.deltaY > 0 ? (1 / 1.1) : 1.1;
-        applyOverlayZoom();
-        updateOverlayFitBtns();
-    }
-}, { passive: false });
-
-// Export SVG from overlay
-ovExport.addEventListener('click', () => {
-    if (!ovSvgSource) return;
-    const blob = new Blob([ovSvgSource], { type: 'image/svg+xml' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'diagram.svg';
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
-});
-
-// Close overlay
-ovClose.addEventListener('click', closeOverlay);
-document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && overlay.classList.contains('active')) {
-        closeOverlay();
-    }
-});
-
-// Resize handler for overlay fit
-let ovResizeTimer = null;
-window.addEventListener('resize', () => {
-    clearTimeout(ovResizeTimer);
-    ovResizeTimer = setTimeout(() => {
-        if (overlay.classList.contains('active') && ovFitMode !== 'none') {
-            updateOverlayFit();
-        }
-    }, 80);
-});
-
-/* ----- Event delegation for expand buttons ----- */
-contentEl.addEventListener('click', (e) => {
-    const expandBtn = e.target.closest('[data-expand]');
-    if (!expandBtn) return;
-    const blockId = expandBtn.dataset.expand;
-    const block = document.getElementById(blockId);
-    if (!block) return;
-    const wrap = block.querySelector('.mermaid-svg-wrap');
-    if (!wrap) return;
-    const svg = wrap.innerHTML;
-    if (svg) openOverlay(svg);
-});
-
-// Re-place the cursor when layout shifts (images loading, window resize, etc.)
-new ResizeObserver(() => {
-    if (lastScrollData) placeCursor(lastScrollData, { scroll: !scrollSyncPaused });
-}).observe(contentEl);
-
-// Bottom padding
 function applyBottomPadding() {
     contentEl.style.paddingBottom = `${(1 - BOTTOM_PADDING) * window.innerHeight}px`;
 }
-window.addEventListener('resize', applyBottomPadding);
 
-/* ----- Main ----- */
+/************************************************************
+ * Main
+ ************************************************************/
+
 (async function main() {
     try {
+        // Apply theme
+        themeBtn.addEventListener('click', () => {
+            applyTheme(currentTheme === 'dark' ? 'light' : 'dark');
+            renderAllMermaidBlocks();
+        });
+
+        // Setup markdown-it
+        setupMarkdownit()
+
+        // Pause scroll sync briefly when user scrolls the browser manually
+        window.addEventListener('wheel', () => {
+            scrollSyncPaused = true;
+            clearTimeout(scrollSyncPauseTimer);
+            scrollSyncPauseTimer = setTimeout(() => { scrollSyncPaused = false; }, 3000);
+        }, { passive: true });
+        window.addEventListener('touchmove', () => {
+            scrollSyncPaused = true;
+            clearTimeout(scrollSyncPauseTimer);
+            scrollSyncPauseTimer = setTimeout(() => { scrollSyncPaused = false; }, 3000);
+        }, { passive: true });
+
+        // Sync cursor (browser -> nvim)
+        contentEl.addEventListener('click', (e) => {
+            // No cursor message from nvim yet (or scroll_sync is off): stay inert.
+            if (e.button !== 0 || !lastScrollData) return;
+            if (!window.getSelection().isCollapsed) return; // user is selecting text
+            if (e.target.closest('a, button, summary, input, textarea, select, [data-expand]')) return;
+
+            const caret = charUnderPoint(e.clientX, e.clientY);
+            const useCaret = !!caret && contentEl.contains(caret.node);
+            const node = useCaret ? caret.node : e.target;
+            const el = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+            const hit = el && el.closest('[data-source-line]');
+
+            let pos;
+            if (hit) {
+                pos = sourcePosFor(hit, node, useCaret ? caret.offset : 0);
+            } else {
+                // Raw HTML blocks and pre-rendered mermaid carry no source range:
+                // fall back to the nearest tagged block above the click.
+                let above = null;
+                for (const b of contentEl.querySelectorAll('[data-source-line]')) {
+                    if (b.getBoundingClientRect().top > e.clientY) break;
+                    above = b;
+                }
+                if (!above) return;
+                pos = { line: +above.dataset.sourceLine, col: 0 };
+            }
+            jumpNvimTo(pos.line, pos.col);
+        });
+
+        // Overlay click events
+        ovZoomIn.addEventListener('click', () => { ovFitMode = 'none'; ovZoom *= 1.2; applyOverlayZoom(); updateOverlayFitBtns(); });
+        ovZoomOut.addEventListener('click', () => { ovFitMode = 'none'; ovZoom /= 1.2; applyOverlayZoom(); updateOverlayFitBtns(); });
+        ovZoomReset.addEventListener('click', () => { ovFitMode = 'none'; ovZoom = 1; applyOverlayZoom(); updateOverlayFitBtns(); });
+        ovFitWidth.addEventListener('click', () => { ovFitMode = ovFitMode === 'width' ? 'none' : 'width'; updateOverlayFit(); updateOverlayFitBtns(); });
+        ovFitHeight.addEventListener('click', () => { ovFitMode = ovFitMode === 'height' ? 'none' : 'height'; updateOverlayFit(); updateOverlayFitBtns(); });
+
+        // Overlay pan (drag)
+        overlayPanzoom.addEventListener('mousedown', (e) => {
+            ovDragging = true; overlayPanzoom.classList.add('dragging');
+            ovStartX = e.clientX; ovStartY = e.clientY;
+            ovStartL = overlayPanzoom.scrollLeft; ovStartT = overlayPanzoom.scrollTop;
+        });
+        window.addEventListener('mousemove', (e) => {
+            if (!ovDragging) return;
+            overlayPanzoom.scrollLeft = ovStartL - (e.clientX - ovStartX);
+            overlayPanzoom.scrollTop = ovStartT - (e.clientY - ovStartY);
+        });
+        window.addEventListener('mouseup', () => { ovDragging = false; overlayPanzoom.classList.remove('dragging'); });
+
+        // Overlay wheel zoom
+        overlayPanzoom.addEventListener('wheel', (e) => {
+            if (e.ctrlKey || e.metaKey) {
+                e.preventDefault();
+                ovFitMode = 'none';
+                ovZoom *= e.deltaY > 0 ? (1 / 1.1) : 1.1;
+                applyOverlayZoom();
+                updateOverlayFitBtns();
+            }
+        }, { passive: false });
+
+        // Export SVG from overlay
+        ovExport.addEventListener('click', () => {
+            if (!ovSvgSource) return;
+            const blob = new Blob([ovSvgSource], { type: 'image/svg+xml' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = 'diagram.svg';
+            a.click();
+            setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+        });
+
+        // Close overlay
+        ovClose.addEventListener('click', closeOverlay);
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && overlay.classList.contains('active')) {
+                closeOverlay();
+            }
+        });
+
+        // Resize handler for overlay fit
+        let ovResizeTimer = null;
+        window.addEventListener('resize', () => {
+            clearTimeout(ovResizeTimer);
+            ovResizeTimer = setTimeout(() => {
+                if (overlay.classList.contains('active') && ovFitMode !== 'none') {
+                    updateOverlayFit();
+                }
+            }, 80);
+        });
+
+        // Event delegation for expand buttons
+        contentEl.addEventListener('click', (e) => {
+            const expandBtn = e.target.closest('[data-expand]');
+            if (!expandBtn) return;
+            const blockId = expandBtn.dataset.expand;
+            const block = document.getElementById(blockId);
+            if (!block) return;
+            const wrap = block.querySelector('.mermaid-svg-wrap');
+            if (!wrap) return;
+            const svg = wrap.innerHTML;
+            if (svg) openOverlay(svg);
+        });
+
+        // Re-place the cursor when layout shifts (images loading, window resize, etc.)
+        new ResizeObserver(() => {
+            if (lastScrollData) placeCursor(lastScrollData, { scroll: !scrollSyncPaused });
+        }).observe(contentEl);
+
+        // Bottom padding
+        window.addEventListener('resize', applyBottomPadding);
+
         if (document.documentElement.dataset.mermaidElk === 'true') {
             const elkLayouts = await import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.1/dist/mermaid-layout-elk.esm.min.mjs');
             mermaid.registerLayoutLoaders(elkLayouts.default || elkLayouts);
@@ -1068,4 +1111,5 @@ window.addEventListener('resize', applyBottomPadding);
         contentEl.innerHTML = '<p style="color:var(--err-fg)">Error: ' + (e.message || e) + '</p>';
     }
     connectWS();
+
 })();

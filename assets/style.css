@@ -1,4 +1,4 @@
-/* ── CSS Variables (Unified Editorial Theme) ───────────────────── */
+/* CSS Variables (Unified Editorial Theme) */
 :root {
     --bg: #121211;
     --panel: #181817;
@@ -61,7 +61,7 @@
     --color-important: #7c3aed;
 }
 
-/* ── Reset & base ──────────────────────────────────────────────── */
+/* Reset & base */
 *, *::before, *::after {
     box-sizing: border-box;
 }
@@ -82,7 +82,7 @@ body {
     -webkit-font-smoothing: antialiased;
 }
 
-/* ── Header ────────────────────────────────────────────────────── */
+/* Header */
 header {
     position: sticky;
     top: 0;
@@ -165,7 +165,7 @@ header h1 {
     padding: .35rem .65rem;
 }
 
-/* ── Loading skeleton ─────────────────────────────────────────── */
+/* Loading skeleton */
 .skeleton {
     padding: 2.5rem;
     max-width: 820px;
@@ -204,7 +204,7 @@ header h1 {
     100% { transform: translateX(100%); }
 }
 
-/* ── Cursor ────────────────────────────────────────────────────── */
+/* Cursor */
 #cursor {
     position: absolute;
     width: 2px;
@@ -217,7 +217,7 @@ header h1 {
 #cursor.block { opacity: .4; animation: none; }
 @keyframes cursor-blink { 50% { opacity: 0; } }
 
-/* ── Markdown content ──────────────────────────────────────────── */
+/* Markdown content */
 #content {
     max-width: 820px;
     margin: 0 auto;
@@ -535,12 +535,12 @@ header h1 {
 #content .markdown-alert.markdown-alert-caution { border-left-color: var(--color-caution); }
 #content .markdown-alert.markdown-alert-caution .markdown-alert-title { color: var(--color-caution); }
 
-/* ── Footnotes ───────────────────────────────────────────────── */
+/* Footnotes */
 #content .footnotes-sep { margin-top: 2.5rem; }
 #content .footnotes { font-size: .85em; color: var(--fg-muted); }
 #content .footnotes ol { padding-left: 1.4em; }
 
-/* ── Mermaid diagrams ──────────────────────────────────────────── */
+/* Mermaid diagrams */
 .mermaid-block {
     position: relative;
     margin: 1.2em 0;
@@ -597,7 +597,7 @@ header h1 {
     display: none !important;
 }
 
-/* ── Fullscreen overlay ────────────────────────────────────────── */
+/* Fullscreen overlay */
 #overlay {
     display: none;
     position: fixed;
@@ -650,7 +650,7 @@ header h1 {
 
 #overlay-panzoom.dragging { cursor: grabbing; }
 
-/* ── Media queries ────────────────────────────────────────────── */
+/* Media queries */
 @media (max-width: 768px) {
     #content { padding: 2rem 1.25rem 4rem; }
 }

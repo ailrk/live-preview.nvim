@@ -6,12 +6,7 @@ local ls_server = require("live_server.server")
 local ls_util = require("live_server.util")
 local M = {}
 
-
-
 M.config = {
-	-- 0 = auto (the OS picks a free port)
-	port = 0,
-
 	-- bind address; "0.0.0.0" for network access (e.g. over SSH)
 	host = "127.0.0.1",
 	open_browser = true,
@@ -75,13 +70,11 @@ M.config = {
 	},
 }
 
-
 function M.setup(opts)
 	M.config = vim.tbl_deep_extend("force", M.config, opts or {})
 	M.config.bottom_padding = math.max(0, math.min(1, M.config.bottom_padding))
 	M._mmdr_available = nil -- reset so next check re-probes
 end
-
 
 -- Internal state
 M._augroup = nil
@@ -92,16 +85,14 @@ M._debounce_seq = 0
 M._workspace_dir = nil
 M._mmdr_available = nil -- nil = unchecked, true/false after probe
 M._token = nil          -- live-server auth token (one per server lifetime)
-M._follow_augroup = nil --
+M._follow_augroup = nil
 
 ---@type {line:integer, col:integer, mode:string, text:string}|nil
 M._last_cursor = nil
 
-
 local function host_is_loopback()
 	return M.config.host == "127.0.0.1" or M.config.host == "localhost"
 end
-
 
 ---------------------------------------------------------------------------
 -- Workspace
@@ -249,7 +240,6 @@ local function is_mmdr_available()
 	return M._mmdr_available
 end
 
-
 ---Render a single mermaid diagram source via mmdr CLI.
 ---@param source string Raw mermaid diagram text
 ---@return string|nil svg SVG string on success
@@ -262,18 +252,15 @@ local function render_mermaid_via_mmdr(source)
 	return result, nil
 end
 
-
 -- Expand button SVG used in pre-rendered blocks (matches browser-side fence renderer)
 local EXPAND_BTN_SVG = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none">'
 	.. '<path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>'
 	.. "</svg>"
 
-
 local function count_newlines(s)
 	local _, n = s:gsub("\n", "")
 	return n
 end
-
 
 ---Pre-render ```mermaid fences via mmdr, replacing them with HTML blocks.
 ---Failed renders leave the original fence untouched for browser-side fallback.
@@ -363,7 +350,6 @@ local function prerender_mermaid_blocks(text)
 	return table.concat(out)
 end
 
-
 ---------------------------------------------------------------------------
 -- Content writing (unified: markdown or mermaid)
 ---------------------------------------------------------------------------
@@ -402,7 +388,6 @@ local function get_content(bufnr)
 	return text
 end
 
-
 ---Same as get_content but never errors (returns nil on failure).
 ---@param bufnr integer
 ---@return string|nil
@@ -413,7 +398,6 @@ local function get_content_safe(bufnr)
 	end
 	return nil
 end
-
 
 local function write_content(dir, text, bufnr)
 	local path = vim.fs.joinpath(dir, M.config.content_name)
@@ -431,11 +415,9 @@ local function write_content(dir, text, bufnr)
 	return path
 end
 
-
 ---------------------------------------------------------------------------
 -- Refresh logic
 ---------------------------------------------------------------------------
-
 
 local function maybe_refresh(bufnr, silent)
 	bufnr = bufnr or vim.api.nvim_get_current_buf()
@@ -464,18 +446,17 @@ local function maybe_refresh(bufnr, silent)
 	return true
 end
 
-
 local function debounced_refresh(bufnr)
 	M._debounce_seq = M._debounce_seq + 1
 	local this_call = M._debounce_seq
-	vim.defer_fn(function()
-		if this_call ~= M._debounce_seq then
-			return
-		end
-		pcall(maybe_refresh, bufnr, true)
-	end, M.config.debounce_ms)
-end
 
+    --- don't debounce if we change the buffer, otherwise it can be a race
+    --- condition. (maybe_refresh refreshes to the old bufnr)
+    vim.defer_fn(function()
+        if this_call ~= M._debounce_seq or bufnr ~= M._active_bufnr then return end
+        pcall(maybe_refresh, bufnr, true)
+    end, M.config.debounce_ms)
+end
 
 ---------------------------------------------------------------------------
 -- Cursor sync (nvim -> browser)
@@ -490,7 +471,6 @@ local function content_line_offset(bufnr)
 	if name:match("%.mmd$") or name:match("%.mermaid$") then return 1 end
 	return nil
 end
-
 
 ---@param bufnr integer
 ---@param force boolean|nil  send even if nothing changed (e.g. on start / browser hello)
@@ -545,7 +525,7 @@ local function goto_position(msg)
 	local offset = content_line_offset(bufnr)
 	if not offset then return end
 
-	-- The message comes from the browser: validate everything.
+	-- The message comes from the browser, validate before proceeding.
 	if type(msg.line) ~= "number" or msg.line ~= msg.line then return end
 
 	-- Only move the cursor if the buffer is visible somewhere.
@@ -581,9 +561,8 @@ local function goto_position(msg)
 	pcall(vim.cmd, "redraw")
 end
 
-
--- Handle messages sent by the browser over the websocket.
--- Runs in a libuv callback, so hop onto the main loop before touching nvim.
+-- Handle messages sent by the browser over the websocket. Runs in a libuv
+-- callback.
 local function on_browser_message(raw)
 	vim.schedule(function()
 		local ok, msg = pcall(vim.json.decode, raw)
@@ -596,7 +575,6 @@ local function on_browser_message(raw)
 		end
 	end)
 end
-
 
 ---------------------------------------------------------------------------
 -- Autocmds
@@ -629,8 +607,8 @@ local function set_autocmds_for_buffer(bufnr)
 	end
 
 	-- Not buffer-local on purpose: ModeChanged's pattern is matched against
-	-- "old:new" modes, so buffer-local registration is unreliable. The
-	-- callback checks the buffer itself.
+    -- "old:new" modes, so buffer-local registration is unreliable. The
+    -- callback checks the buffer itself.
 	vim.api.nvim_create_autocmd("ModeChanged", {
 		group = M._augroup,
 		callback = function()
@@ -639,7 +617,6 @@ local function set_autocmds_for_buffer(bufnr)
 		desc = "Markdown Preview cursor shape sync",
 	})
 end
-
 
 local function set_follow_autocmd()
 	if M._follow_augroup then
@@ -688,10 +665,8 @@ local function browser_url(port)
 	local display_host = (M.config.host == "0.0.0.0") and lan_ip() or M.config.host
 	local base = ("http://%s:%d/"):format(display_host, port)
     local url = M._token and M._token ~= "" and base .. "?t=" .. M._token or base
-    vim.notify("[live-preview]: serving on " .. url)
 	return url
 end
-
 
 function M.start()
 	local bufnr = vim.api.nvim_get_current_buf()
@@ -708,7 +683,7 @@ function M.start()
 	M._workspace_dir = dir
 
 	-- One token per server lifetime, reused across retargets. Must exist
-	-- before writing index.html, which bakes it in via __LIVE_TOKEN__.
+    -- before writing index.html because it is baked in via __LIVE_TOKEN__.
 	if not M._token or M._token == "" then
 		M._token = ls_util.random_token(16)
 	end
@@ -732,35 +707,23 @@ function M.start()
 		-- On a network bind the index page must be gated too: it is the
 		-- browser's bootstrap document, and serving it openly would hand the
 		-- preview to any peer that can reach the port. The tokenized ?t= URL
-		-- (printed by hooks.on_start / opened by the browser) unlocks it.
+		-- unlocks it.
 		table.insert(protected, "^/$")
 		table.insert(protected, "^/" .. vim.pesc(M.config.index_name) .. "$")
-	end
-
-	-- Relative image support needs the asset route in live-server. The two
-	-- plugins are versioned independently, so warn (once) if the installed
-	-- live-server predates it — images will 404 until it's updated.
-	if not (ls_server.features and ls_server.features.asset_route) and not M._warned_no_asset_route then
-		M._warned_no_asset_route = true
-		vim.notify(
-			"Markdown Preview: relative images need a newer live-server.nvim (with the asset route).\n"
-				.. "Update live-server.nvim, or relative images will not load.",
-			vim.log.levels.WARN
-		)
 	end
 
 	local index_path = vim.fs.joinpath(dir, M.config.index_name)
 
 	if not M._server_instance then
 		local ok, inst = pcall(ls_server.start, {
-			port = M.config.port,
+            -- the OS picks a free port
+			port = 0,
 			host = M.config.host,
 			root = dir,
 			default_index = index_path,
 			headers = { ["cache-control"] = "no-cache" },
-			-- No cors: the preview page is same-origin and remote.lua talks raw
-			-- TCP. A wildcard ACAO would let any website in the user's browser
-			-- read the token out of the (unauthenticated) index page.
+            -- No cors: the preview page is same-origin. cors would let any
+            -- website in the browser read the token out from the index page.
 			live = {
 				enabled = true,
 				inject_script = false,
@@ -772,9 +735,8 @@ function M.start()
 			features = { dirlist = { enabled = false } },
 			token = M._token,
 			protected_paths = protected,
-			-- Resolve relative image paths against the source file's dir
-			-- (issue #17). Read per request so buffer switches retarget it
-			-- via the sidecar.
+            -- Resolve relative image paths against the source file's dir. Read
+            -- per request so buffer switches retarget it via the sidecar.
 			asset_root = function()
 				local ws = M._workspace_dir
 				if not ws then return nil end
@@ -786,7 +748,7 @@ function M.start()
 		})
 		if not ok then
 			vim.notify(
-				("Markdown Preview: failed to start server (port %s) — %s"):format(tostring(M.config.port), tostring(inst)),
+				("Markdown Preview: failed to start server %s"):format(tostring(inst)),
 				vim.log.levels.ERROR
 			)
 			return
@@ -811,7 +773,7 @@ function M.start()
 			M.config.hooks.on_start(browser_url(M._server_instance.port))
 		end
 
-		-- No browser tab connected (user closed it)? Re-open.
+		-- No browser tab connected: reopen.
 		if M.config.open_browser and ls_server.connected_client_count(M._server_instance) == 0 then
 			vim.defer_fn(function()
 				util.open_in_browser(browser_url(M._server_instance.port), M.config.browser)
@@ -824,7 +786,6 @@ function M.start()
 	vim.defer_fn(function() send_cursor_sync(bufnr, true) end, 500)
 end
 
-
 function M.refresh()
 	local bufnr = vim.api.nvim_get_current_buf()
 	local changed = maybe_refresh(bufnr, false)
@@ -832,7 +793,6 @@ function M.refresh()
 		vim.notify("Markdown Preview: no changes detected", vim.log.levels.INFO)
 	end
 end
-
 
 function M.stop()
 	if M._augroup then
