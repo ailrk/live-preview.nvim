@@ -17,7 +17,7 @@ const LIVE_TOKEN = new URLSearchParams(location.search).get('t') || '';
 
 const YAML_MODE = document.documentElement.dataset.yamlMode || 'panel';
 
-const PENDING_CURSOR_MS = 250;    // safety net: never hold a cursor longer
+const PENDING_CURSOR_MS = 100;    // safety net: never hold a cursor longer
 
 const CURSOR_ANIM_MS = 80;        // 0 = no animation
 const CURSOR_ANIM_MAX_PX = 500;   // farther than this, cursor and page just jump
@@ -546,6 +546,7 @@ function enqueue(fn) {
         .catch((e) => console.error('[live-preview] sync failed:', e));
     return syncChain;
 }
+
 function sync(initial = false, tick = null) {
     return enqueue(() => syncImpl(initial, tick));
 }
@@ -818,13 +819,15 @@ function placeCursor(data, { scroll = true, animate = true } = {}) {
     drawCursor(px, py, pos.h, pos.w, block, scrollTop, animate);
 }
 
-// Content up to `tick` is now on screen: release the cursor held back for it.
+// @1
+
 function settleCursor(tick, initial = false) {
     if (tick != null) renderedTick = tick;
     let released = false;
     if (pendingCursor && (pendingCursor.tick == null || pendingCursor.tick <= renderedTick)) {
         pendingCursor = null;
         clearTimeout(pendingTimer);
+        pendingTimer = null;
         released = true;
     }
     if (lastScrollData && !pendingCursor) {
@@ -834,18 +837,26 @@ function settleCursor(tick, initial = false) {
 
 function onCursorMessage(data) {
     lastScrollData = data;
-    clearTimeout(pendingTimer);
-    pendingCursor = null;
     // fresh === false: nvim has an edit the browser hasn't been sent yet.
     if (data.fresh === false && data.tick != null && data.tick > renderedTick) {
-        pendingCursor = data;
-        pendingTimer = setTimeout(() => {
-            if (pendingCursor !== data) return;
-            pendingCursor = null;
-            placeCursor(data, { scroll: !scrollSyncPaused });
-        }, PENDING_CURSOR_MS);
+        pendingCursor = data; // the newest cursor wins
+        // Bounded hold. The timer starts with the FIRST held cursor and is not
+        // restarted by later ones: while you type faster than the page renders,
+        // every new cursor is "ahead" of the content, and a timer that restarted
+        // each time would never fire until you stopped typing.
+        if (!pendingTimer) {
+            pendingTimer = setTimeout(() => {
+                pendingTimer = null;
+                const d = pendingCursor;
+                pendingCursor = null;
+                if (d) placeCursor(d, { scroll: !scrollSyncPaused });
+            }, PENDING_CURSOR_MS);
+        }
         return;
     }
+    pendingCursor = null;
+    clearTimeout(pendingTimer);
+    pendingTimer = null;
     placeCursor(data, { scroll: !scrollSyncPaused });
 }
 

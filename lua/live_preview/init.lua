@@ -65,6 +65,7 @@ M._last_text_by_buf = {}
 M._server_instance = nil
 M._written_tick = {}
 M._refresh_timer = nil
+M._refresh_bufnr = nil
 M._workspace_dir = nil
 M._token = nil          -- live-server auth token (one per server lifetime)
 M._follow_augroup = nil
@@ -312,17 +313,18 @@ local function maybe_refresh(bufnr)
 end
 
 local function debounced_refresh(bufnr)
+	M._refresh_bufnr = bufnr -- the timer refreshes whichever buffer asked last
 	if not M._refresh_timer then
 		M._refresh_timer = vim.loop.new_timer()
 	end
-	M._refresh_timer:stop()
+	if M._refresh_timer:is_active() then return end
 	M._refresh_timer:start(M.config.debounce_ms, 0, vim.schedule_wrap(function()
+		local b = M._refresh_bufnr
 		-- Buffer switched meanwhile: start() already wrote the new buffer.
-		if bufnr ~= M._active_bufnr then return end
-		pcall(maybe_refresh, bufnr)
+		if b ~= M._active_bufnr then return end
+		pcall(maybe_refresh, b)
 	end))
 end
-
 
 ---------------------------------------------------------------------------
 -- Cursor sync (nvim -> browser)
