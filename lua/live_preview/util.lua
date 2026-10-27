@@ -148,11 +148,11 @@ end
 function M.workspace_for_buffer(bufnr)
 	local name = vim.api.nvim_buf_get_name(bufnr)
 	local hash = vim.fn.sha256(name):sub(1, 12)
-	return vim.fs.joinpath(vim.fn.stdpath("cache"), "markdown-preview", hash)
+	return vim.fs.joinpath(vim.fn.stdpath("cache"), "live-preview", hash)
 end
 
 function M.shared_workspace()
-	return vim.fs.joinpath(vim.fn.stdpath("cache"), "markdown-preview", "shared")
+	return vim.fs.joinpath(vim.fn.stdpath("cache"), "live-preview", "shared")
 end
 
 return M

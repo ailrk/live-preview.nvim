@@ -107,7 +107,6 @@ local function write_index(dir)
 
 	content = content:gsub("__BOTTOM_PADDING__", function() return tostring(M.config.bottom_padding) end)
 	content = content:gsub("__STYLE_CSS__", function() return util.read_text(style_css) end)
-	content = content:gsub("__MAIN_JS__", function() return util.read_text(main_js) end)
 	content = content:gsub("__THEME__", function() return M.config.default_theme end)
 	content = content:gsub("__ALLOW_HTML__", function() return M.config.allow_raw_html ~= false and "true" or "false" end)
 	content = content:gsub("__YAML_MODE__", function()
@@ -125,12 +124,37 @@ local function write_index(dir)
 				return "<style>\n" .. css .. "\n</style>\n</head>"
 			end, 1)
 		else
-			vim.notify("Markdown Preview: custom_css not readable: " .. css_src, vim.log.levels.WARN)
+			vim.notify("Live Preview: custom_css not readable: " .. css_src, vim.log.levels.WARN)
 		end
 	end
 
 	util.write_text(dst, content)
 	return dst
+end
+
+local function write_js(dir)
+    local assets_dir = util.resolve_asset("assets")
+    if not assets_dir then
+        vim.notify("Live Preview: Could not locate assets directory", vim.log.levels.WARN)
+        return
+    end
+
+    local ok, err = pcall(function()
+        for name, ft in vim.fs.dir(assets_dir) do
+            if ft == "file" and name:match("%.js$") then
+                local src = util.resolve_asset("assets/" .. name)
+                local dst = vim.fs.joinpath(dir, name)
+                if src then
+                    local content = util.read_text(src)
+                    util.write_text(dst, content)
+                end
+            end
+        end
+    end)
+
+    if not ok then
+        vim.notify("Live Preview: Failed to write JavaScript assets: " .. tostring(err), vim.log.levels.ERROR)
+    end
 end
 
 ---------------------------------------------------------------------------
@@ -301,6 +325,7 @@ local function maybe_refresh(bufnr)
 	end
 
 	local dir = M._workspace_dir or ensure_workspace(bufnr)
+    print("HELLO")
 	write_content(dir, text, bufnr)
 	M._last_text_by_buf[bufnr] = text
 	M._written_tick[bufnr] = tick
@@ -390,7 +415,7 @@ local function send_cursor_sync(bufnr, force, settled)
 			total = vim.api.nvim_buf_line_count(bufnr) + offset,
 		})
 		if not ok then
-			vim.notify("Markdown Preview: cursor broadcast failed: " .. tostring(err), vim.log.levels.ERROR)
+			vim.notify("Live Preview: cursor broadcast failed: " .. tostring(err), vim.log.levels.ERROR)
 		end
 	end
 end
@@ -479,7 +504,7 @@ local function set_autocmds_for_buffer(bufnr)
             callback = function()
                 debounced_refresh(bufnr)
             end,
-            desc = "Markdown Preview auto-refresh (debounced)",
+            desc = "Live Preview auto-refresh (debounced)",
         })
     end
 
@@ -488,7 +513,7 @@ local function set_autocmds_for_buffer(bufnr)
 			group = M._augroup,
 			buffer = bufnr,
 			callback = function() send_cursor_sync(bufnr) end,
-			desc = "Markdown Preview cursor sync",
+			desc = "Live Preview cursor sync",
 		})
 	end
 
@@ -500,7 +525,7 @@ local function set_autocmds_for_buffer(bufnr)
 		callback = function()
 			if vim.api.nvim_get_current_buf() == bufnr then send_cursor_sync(bufnr) end
 		end,
-		desc = "Markdown Preview cursor shape sync",
+		desc = "Live Preview cursor shape sync",
 	})
 end
 
@@ -524,7 +549,7 @@ local function set_follow_autocmd()
 				end
 			end)
 		end,
-		desc = "Markdown Preview: follow the current markdown buffer",
+		desc = "Live Preview: follow the current markdown buffer",
 	})
 end
 
@@ -562,7 +587,7 @@ function M.start()
 
 	local ok_content, text = pcall(get_content, bufnr)
 	if not ok_content then
-		vim.notify("Markdown Preview: " .. tostring(text), vim.log.levels.ERROR)
+		vim.notify("Live Preview: " .. tostring(text), vim.log.levels.ERROR)
 		return
 	end
 
@@ -575,6 +600,7 @@ function M.start()
 		M._token = ls_util.random_token(16)
 	end
 
+    write_js(dir)
 	write_index(dir)
 	write_content(dir, text, bufnr)
 	M._last_text_by_buf[bufnr] = text
@@ -616,7 +642,7 @@ function M.start()
 		})
 		if not ok then
 			vim.notify(
-				("Markdown Preview: failed to start server %s"):format(tostring(inst)),
+				("Live Preview: failed to start server %s"):format(tostring(inst)),
 				vim.log.levels.ERROR
 			)
 			return
@@ -658,7 +684,7 @@ function M.refresh()
 	local bufnr = vim.api.nvim_get_current_buf()
 	local changed = maybe_refresh(bufnr)
 	if not changed and M.config.notify_on_refresh then
-		vim.notify("Markdown Preview: no changes detected", vim.log.levels.INFO)
+		vim.notify("Live Preview: no changes detected", vim.log.levels.INFO)
 	end
 end
 

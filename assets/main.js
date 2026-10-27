@@ -12,6 +12,9 @@ const SUN_SVG = '<circle cx="12" cy="12" r="5" stroke="currentColor" stroke-widt
 const COPY_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><rect x="9" y="9" width="13" height="13" rx="2" stroke="currentColor" stroke-width="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" stroke="currentColor" stroke-width="2"/></svg>';
 const CHECK_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M20 6 9 17l-5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
+const HTML_TAG = /<(\/?)([A-Za-z][\w:-]*)(?:"[^"]*"|'[^']*'|[^'">])*>/y;
+const HTML_ENTITY = /&(?:#\d+|#x[0-9a-f]+|[A-Za-z][A-Za-z0-9]*);/iy;
+
 // Live-reload auth token, stashed in sessionStorage to survive refresh.
 const LIVE_TOKEN = new URLSearchParams(location.search).get('t') || '';
 
@@ -244,12 +247,41 @@ function setupMarkdownit(alerts) {
         });
     }
 
+    // Display math has no source range of its own: wrap it so cursor sync
+    // can find it. Generated HTML, so a wrapper is safe here.
+    for (const name of ['math_block', 'math_block_eqno']) {
+        const inner = md.renderer.rules[name];
+        if (!inner) continue;
+        md.renderer.rules[name] = (tokens, idx, ...rest) => {
+            const t = tokens[idx];
+            const html = inner(tokens, idx, ...rest);
+            if (!t.map) return html;
+            return `<div class="math-block"
+                         data-kind="math"
+                         data-source-line="${t.map[0]}"
+                         data-source-end="${mathBlockEnd(t)}">
+                        ${html}
+                    </div>`;
+        };
+    }
+
     md.renderer.rules.paragraph_open = injectLineNumbers;
     md.renderer.rules.heading_open = injectLineNumbers;
     md.renderer.rules.list_item_open = injectLineNumbers;
     md.renderer.rules.table_open = injectLineNumbers;
     md.renderer.rules.tr_open = injectLineNumbers;
     md.renderer.rules.blockquote_open = injectLineNumbers;
+
+    // Raw HTML blocks carry no source range. Emit an empty marker before them
+    // instead of wrapping them: raw HTML may be unbalanced (an opening <div>
+    // closed by a later block), and a wrapper would swallow the difference.
+    md.renderer.rules.html_block = (tokens, idx) => {
+        const t = tokens[idx];
+        const mark = t.map
+            ? `<span hidden data-kind="html" data-source-line="${t.map[0]}" data-source-end="${t.map[1]}"></span>`
+            : '';
+        return mark + t.content;
+    };
 
     // Override fence renderer to handle mermaid specially
     const defaultFence = md.renderer.rules.fence;
@@ -574,7 +606,26 @@ function visibleLen(s, end = s.length, blockMarkers = true) {
             if (i + 1 < end) n++;
             i += 2; continue;
         }
-        if (c === '`' || c === '*' || c === '~') { i++; continue; }
+        if (c === '`') {
+            // code span: characters are literal, nothing inside is markup.
+            // e.g `$HOME` is not math.
+            let run = 1;
+            while (s[i + run] === '`') run++;
+            const close = s.indexOf('`'.repeat(run), i + run);
+            if (close < 0) { i += run; continue; }   // stray backticks: markup only
+            const from = i + run;
+            if (end <= from) break;
+            if (end <= close) return n + (end - from);
+            n += close - from;
+            i = close + run;
+            continue;
+        }
+        if (c === '*' || c === '~') { i++; continue; }
+        if (c === '!' || c === '$') {
+            // Images and inline math have no text nodes: they count as nothing.
+            const ae = atomEnd(s, i);
+            if (ae > 0) { i = ae; continue; }
+        }
         if (c === '_') {
             if (/\w/.test(s[i - 1] || '') && /\w/.test(s[i + 1] || '')) n++;
             i++; continue;
@@ -606,8 +657,11 @@ function textNodesOf(el) {
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
         acceptNode(n) {
             for (let p = n.parentElement; p && p !== root; p = p.parentElement) {
-                if (p.hasAttribute('data-source-line') || skip.has(p.tagName) ||
-                    p.classList.contains('katex-mathml')) return NodeFilter.FILTER_REJECT;
+                if (p.hasAttribute('data-source-line')
+                    || skip.has(p.tagName)
+                    || p.tagName === 'EQ'
+                    || p.classList.contains('katex'))
+                    return NodeFilter.FILTER_REJECT;
             }
             return NodeFilter.FILTER_ACCEPT;
         }
@@ -615,6 +669,258 @@ function textNodesOf(el) {
     const out = [];
     while (walker.nextNode()) out.push(walker.currentNode);
     return out;
+}
+
+// End (exclusive) of the image or inline math that starts at s[i], or -1.
+function atomEnd(s, i) {
+    const c = s[i];
+    if (c === '!' && s[i + 1] === '[') {
+        // ![alt](url) or ![alt][ref]
+        let depth = 0, j = i + 1;
+        for (; j < s.length; j++) {
+            if (s[j] === '\\') { j++; continue; }
+            if (s[j] === '[') depth++;
+            else if (s[j] === ']' && --depth === 0) break;
+        }
+        if (j >= s.length) return -1;
+        if (s[j + 1] === '(') { const k = s.indexOf(')', j + 2); return k < 0 ? -1 : k + 1; }
+        if (s[j + 1] === '[') { const k = s.indexOf(']', j + 2); return k < 0 ? -1 : k + 1; }
+        return -1;
+    }
+    if (c === '$') {
+        // $...$ and $$...$$, with texmath's rules: no space after the opening $,
+        // none before the closing one, no digit right after a closing single $.
+        const n = s[i + 1] === '$' ? 2 : 1;
+        if (/\s/.test(s[i + n] || ' ')) return -1;
+        for (let j = i + n; j < s.length; j++) {
+            if (s[j] === '\\') { j++; continue; }
+            if (s[j] !== '$') continue;
+            if (n === 2 && s[j + 1] !== '$') continue;
+            if (/\s/.test(s[j - 1])) return -1;
+            if (n === 1 && /\d/.test(s[j + 1] || '')) return -1;
+            return j + n;
+        }
+    }
+    return -1;
+}
+
+// Images and inline math in a block's source, in order, up to position `upto`.
+function scanAtoms(src, upto) {
+    const atoms = [];
+    let i = 0;
+    while (i < src.length && i <= upto) {
+        const c = src[i];
+        if (c === '\\') { i += 2; continue; }
+        if (c === '`') {
+            let run = 1;
+            while (src[i + run] === '`') run++;
+            const close = src.indexOf('`'.repeat(run), i + run);
+            i = close < 0 ? i + run : close + run;
+            continue;
+        }
+        if (c === '!' || c === '$') {
+            const end = atomEnd(src, i);
+            if (end > 0) {
+                atoms.push({ kind: c === '!' ? 'img' : 'math', start: i, end });
+                i = end;
+                continue;
+            }
+        }
+        if (c === '<') {
+            const m = /^<img\b[^>]*>/i.exec(src.slice(i, i + 1000));
+            if (m) { atoms.push({ kind: 'img', start: i, end: i + m[0].length }); i += m[0].length; continue; }
+        }
+        i++;
+    }
+    return atoms;
+}
+
+// Exclusive end line of a display-math block. Found by looking for the closing
+// delimiter instead of trusting token.map, which can stop a line short.
+function mathBlockEnd(t) {
+    const s = t.map[0];
+    const L = (l) => srcLines[l] || '';
+    if (t.tag === 'beg_end') {
+        let depth = 0;
+        for (let l = s; l < srcLines.length; l++) {
+            depth += (L(l).match(/\\begin\{/g) || []).length;
+            depth -= (L(l).match(/\\end\{/g) || []).length;
+            if (depth <= 0) return l + 1;
+        }
+    } else if (t.tag === '$$') {
+        const open = L(s).indexOf('$$');
+        if (open >= 0 && L(s).indexOf('$$', open + 2) >= 0) return s + 1;   // one-liner
+        for (let l = s + 1; l < srcLines.length; l++) if (L(l).includes('$$')) return l + 1;
+    }
+    return Math.max(t.map[1], s + 1);
+}
+
+// Cursor on an image or inline math inside a paragraph, heading, list item...
+// Images get the cursor drawn over them; math gets a bar placed in proportion
+// to the position inside the formula (KaTeX has no source map).
+function atomUnderCursor(hit, line, col) {
+    const s = +hit.dataset.sourceLine, e = +hit.dataset.sourceEnd;
+    const lines = [];
+    for (let l = s; l < e; l++) lines.push(srcLines[l] ?? '');
+    let idx = col;
+    for (let l = s; l < line; l++) idx += lines[l - s].length + 1;
+
+    const atoms = scanAtoms(lines.join('\n'), idx);
+    const a = atoms.find((x) => idx >= x.start && idx < x.end);
+    if (!a) return null;
+    const k = atoms.filter((x) => x.kind === a.kind && x.start < a.start).length;
+    const els = [...hit.querySelectorAll(a.kind === 'img' ? 'img' : 'eq, eqn')]
+        .filter((n) => n.closest('[data-source-line]') === hit);
+    const el = els[k];
+    if (!el) return null;
+
+    const b = el.getBoundingClientRect();
+    if (a.kind === 'img') return { x: b.left, y: b.top, h: b.height, w: b.width, image: true };
+    const span = a.end - a.start;
+    return { x: b.left + ((idx - a.start) / span) * b.width, y: b.top, h: b.height, w: Math.max(2, b.width / span) };
+}
+
+// Display math: no way to ask KaTeX where a source column lands, so place the
+// cursor proportionally: the row from the source line, the x from the column.
+function locateInMathBlock(hit, line, col) {
+    const s = +hit.dataset.sourceLine, e = +hit.dataset.sourceEnd;
+    const b = (hit.querySelector('.katex') || hit).getBoundingClientRect();
+    const rows = [];
+    for (let l = s; l < e; l++) {
+        const t = (srcLines[l] || '').trim();
+        if (t && t !== '$$') rows.push(l);
+    }
+    if (!rows.length) return { x: b.left, y: b.top, h: b.height, w: 2 };
+    let r = rows.findIndex((l) => l >= line);
+    if (r < 0) r = rows.length - 1;
+    const maxLen = Math.max(1, ...rows.map((l) => srcLines[l].trim().length));
+    const text = srcLines[rows[r]] || '';
+    const lead = text.length - text.trimStart().length;
+    const f = rows[r] === line
+        ? Math.min(1, Math.max(0, (col - lead) / maxLen))
+        : (line > rows[r] ? 1 : 0);
+    const rowH = b.height / rows.length;
+    return { x: b.left + f * b.width, y: b.top + r * rowH, h: rowH, w: Math.max(2, b.width / maxLen) };
+}
+
+// Raw HTML blocks. The visible text of the block is its source minus tags,
+// comments and script/style bodies, with entities as one character. The DOM
+// keeps the same text in its text nodes, so a position can be carried across by
+// counting non-whitespace characters (whitespace is collapsed, dropped or
+// re-created by the HTML parser in too many ways to count).
+const isWs = (ch) => ch === ' ' || ch === '\n' || ch === '\t' || ch === '\r' || ch === '\f';
+
+// count: visible non-whitespace characters before source index `idx`.
+// img: the <img> (by order) the cursor is on or about to reach, else null.
+// imgsBefore: how many <img> tags start before `idx`.
+function scanHtml(src, idx) {
+    let i = 0, count = 0, seen = 0, imgs = 0, imgsBefore = 0, img = null, nextGap = null;
+    while (i < src.length) {
+        const c = src[i];
+        if (c === '<') {
+            if (src.startsWith('<!--', i)) {
+                const e = src.indexOf('-->', i + 4);
+                i = e < 0 ? src.length : e + 3;
+                continue;
+            }
+            HTML_TAG.lastIndex = i;
+            const m = HTML_TAG.exec(src);
+            if (m) {
+                const end = i + m[0].length, name = m[2].toLowerCase();
+                if (name === 'img' && !m[1]) {
+                    if (i < idx) imgsBefore++;
+                    if (idx >= i && idx < end) img = imgs;                       // on the tag
+                    else if (i >= idx && img === null && nextGap === null) {      // next thing visible?
+                        nextGap = seen - count;
+                        if (nextGap === 0) img = imgs;
+                    }
+                    imgs++;
+                }
+                i = end;
+                if ((name === 'script' || name === 'style') && !m[1]) {
+                    const close = src.toLowerCase().indexOf('</' + name, i);
+                    i = close < 0 ? src.length : close;
+                }
+                continue;
+            }
+        }
+        if (isWs(c)) { i++; continue; }
+        let len = 1;
+        if (c === '&') {
+            HTML_ENTITY.lastIndex = i;
+            const m = HTML_ENTITY.exec(src);
+            if (m) len = m[0].length;
+        }
+        if (i < idx) count++;
+        seen++;
+        i += len;
+    }
+    return { count, img, imgsBefore };
+}
+
+// Text nodes and images of an HTML block: everything between its marker and
+// the next marked block, in document order. No wrapper element is used because
+// raw HTML may be unbalanced (an opening <div> closed by a later block).
+function htmlRegion(marker, next) {
+    const texts = [], imgs = [];
+    const walker = document.createTreeWalker(contentEl, NodeFilter.SHOW_ALL);
+    walker.currentNode = marker;
+    for (let n = walker.nextNode(); n && n !== next; n = walker.nextNode()) {
+        if (n.nodeType === Node.TEXT_NODE) {
+            const p = n.parentElement;
+            if (p && p.tagName !== 'SCRIPT' && p.tagName !== 'STYLE') texts.push(n);
+        } else if (n.tagName === 'IMG') {
+            imgs.push(n);
+        }
+    }
+    return { texts, imgs };
+}
+
+// Offset, in the concatenated text, of the (target+1)th non-whitespace
+// character; -1 when there are fewer characters than that.
+function offsetOfNonWs(nodes, target) {
+    let seen = 0, base = 0;
+    for (const n of nodes) {
+        const t = n.nodeValue;
+        for (let k = 0; k < t.length; k++) {
+            if (isWs(t[k])) continue;
+            if (seen === target) return base + k;
+            seen++;
+        }
+        base += t.length;
+    }
+    return -1;
+}
+
+function locateInHtml(marker, next, line, col, wantWidth) {
+    const s = +marker.dataset.sourceLine, e = +marker.dataset.sourceEnd;
+    const lines = [];
+    for (let l = s; l < e; l++) lines.push(srcLines[l] ?? '');
+    let idx = col;
+    for (let l = s; l < line; l++) idx += lines[l - s].length + 1;
+
+    const { count, img, imgsBefore } = scanHtml(lines.join('\n'), idx);
+    const { texts, imgs } = htmlRegion(marker, next);
+    const imgRect = (el) => {
+        const b = el.getBoundingClientRect();
+        return { x: b.left, y: b.top, h: b.height, w: b.width, image: true };
+    };
+
+    // On an <img> tag, or right before one: the image.
+    if (img != null && imgs[img]) return imgRect(imgs[img]);
+
+    // Otherwise the visible character at or after the cursor.
+    const off = offsetOfNonWs(texts, count);
+    if (off >= 0) {
+        const r = caretRectAt(texts, off, wantWidth);
+        if (r) return r;
+    }
+    // Nothing visible after the cursor: the next image, else the end of the text.
+    if (imgs.length) return imgRect(imgs[Math.min(imgsBefore, imgs.length - 1)]);
+    if (texts.length) {
+        return caretRectAt(texts, texts.reduce((a, n) => a + n.nodeValue.length, 0), wantWidth);
+    }
+    return null;
 }
 
 // Client-space caret rect at a character offset across a list of text nodes.
@@ -681,10 +987,11 @@ function rowTarget(tr, s, col) {
 
 // (line, utf16 col) -> client-space rect, or null
 function locateCursor(line, col, wantWidth) {
-    let hit = null;
-    for (const el of contentEl.querySelectorAll('[data-source-line]')) {
-        const s = +el.dataset.sourceLine, e = +el.dataset.sourceEnd;
-        if (s <= line && line < e) hit = el;
+    const els = contentEl.querySelectorAll('[data-source-line]');
+    let hit = null, hitIdx = -1;
+    for (let k = 0; k < els.length; k++) {
+        const s = +els[k].dataset.sourceLine, e = +els[k].dataset.sourceEnd;
+        if (s <= line && line < e) { hit = els[k]; hitIdx = k; }
         else if (s > line) break;
     }
     if (!hit) return null;
@@ -702,6 +1009,9 @@ function locateCursor(line, col, wantWidth) {
         const b = tr.getBoundingClientRect();
         return { x: b.left, y: b.top, h: b.height, w: 0 };
     }
+
+    if (hit.dataset.kind === 'html') return locateInHtml(hit, els[hitIdx + 1] || null, line, col, wantWidth);
+    if (hit.dataset.kind === 'math') return locateInMathBlock(hit, line, col);
 
     let nodes, offset;
     const cur = srcLines[line] ?? '';
@@ -724,6 +1034,8 @@ function locateCursor(line, col, wantWidth) {
             offset += Math.max(0, col - strip(line));
         }
     } else {
+        const atom = atomUnderCursor(hit, line, col);
+        if (atom) return atom;
         nodes = textNodesOf(hit);
         offset = 0;
         for (let l = s; l < line; l++) offset += visibleLen((srcLines[l] || '').trimEnd()) + 1;
@@ -743,7 +1055,7 @@ function hideCursor() {
 
 // x, y: target in document coordinates. scrollTop: page scroll to end at
 // (null = leave the scroll alone). animate=false snaps.
-function drawCursor(x, y, h, w, block, scrollTop = null, animate = true) {
+function drawCursor(x, y, h, w, block, scrollTop = null, animate = true, image = false) {
     let el = document.getElementById('cursor');
     if (!el) {
         el = document.createElement('div');
@@ -751,8 +1063,9 @@ function drawCursor(x, y, h, w, block, scrollTop = null, animate = true) {
         document.body.appendChild(el);
     }
     el.classList.toggle('block', !!block);
+    el.classList.toggle('on-image', image);
     el.style.height = `${h}px`;
-    el.style.width = block && w ? `${w}px` : '2px';
+    el.style.width = image || (block && w) ? `${w}px` : '2px';
 
     // Already heading to this spot: let the running animation finish.
     if (cursorTween && Math.abs(cursorTween.x - x) < 0.5 && Math.abs(cursorTween.y - y) < 0.5 &&
@@ -815,12 +1128,13 @@ function placeCursor(data, { scroll = true, animate = true } = {}) {
         return;
     }
     const px = pos.x + window.scrollX, py = pos.y + window.scrollY;
-    const scrollTop = scroll ? Math.max(0, py - window.innerHeight / 2) : null;
-    drawCursor(px, py, pos.h, pos.w, block, scrollTop, animate);
+    // centre on the middle of an image, not its top edge
+    const focusY = pos.image ? py + pos.h / 2 : py;
+    const scrollTop = scroll ? Math.max(0, focusY - window.innerHeight / 2) : null;
+    drawCursor(px, py, pos.h, pos.w, block, scrollTop, animate, !!pos.image);
 }
 
-// @1
-
+// Content up to `tick` is now on screen: release the cursor held back for it.
 function settleCursor(tick, initial = false) {
     if (tick != null) renderedTick = tick;
     let released = false;
@@ -917,7 +1231,7 @@ function sourcePosFor(hit, node, offset) {
     const none = { line: s, col: 0 };
 
     // Diagrams and whole tables: jump to the first line.
-    if (hit.classList.contains('mermaid-block') || hit.tagName === 'TABLE') return none;
+    if (hit.classList.contains('mermaid-block') || hit.tagName === 'TABLE' || hit.dataset.kind === 'math') return none;
 
     if (hit.tagName === 'TR') {
         const el = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
@@ -1233,6 +1547,15 @@ function applyBottomPadding() {
 
         // Bottom padding
         window.addEventListener('resize', applyBottomPadding);
+
+        // On an image the cursor becomes an outline around it. Restyle #cursor.on-image
+        // in your custom_css if you want something else.
+        document.head.appendChild(Object.assign(document.createElement('style'), {
+            textContent:
+                `#cursor.on-image { background: transparent !important;
+                 outline: 2px solid var(--accent, #4c8bf5);
+                 outline-offset: 2px; border-radius: 4px; }`,
+        }));
 
         applyTheme(currentTheme);
         setupMarkdownit(await alertsReady);
