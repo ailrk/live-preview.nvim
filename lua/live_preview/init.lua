@@ -100,11 +100,6 @@ local function write_index(dir)
 		error("Could not locate assets/style.css")
 	end
 
-	local main_js = util.resolve_asset("assets/main.js")
-	if not main_js then
-		error("Could not locate assets/main.js")
-	end
-
 	content = content:gsub("__BOTTOM_PADDING__", function() return tostring(M.config.bottom_padding) end)
 	content = content:gsub("__STYLE_CSS__", function() return util.read_text(style_css) end)
 	content = content:gsub("__THEME__", function() return M.config.default_theme end)
@@ -325,7 +320,6 @@ local function maybe_refresh(bufnr)
 	end
 
 	local dir = M._workspace_dir or ensure_workspace(bufnr)
-    print("HELLO")
 	write_content(dir, text, bufnr)
 	M._last_text_by_buf[bufnr] = text
 	M._written_tick[bufnr] = tick
