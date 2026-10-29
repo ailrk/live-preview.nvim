@@ -615,7 +615,7 @@ function M.start()
 	if not M._server_instance then
 		local ok, inst = pcall(ls_server.start, {
 			host = M.config.host,
-			root = dir,
+			roots = { dir },
 			default_index = index_path,
 			headers = { ["cache-control"] = "no-cache" },
 			-- The browser sends {type="hello"} when its websocket opens; reply
@@ -654,7 +654,7 @@ function M.start()
 		end
 	else
 		-- Server already running in this nvim: retarget to this buffer's workspace
-		pcall(ls_server.update_target, M._server_instance, dir, index_path)
+		pcall(ls_server.update_target, M._server_instance, dir)
 		pcall(ls_server.reload, M._server_instance, content_name, tick)
 
 		if type(M.config.hooks.on_start) == "function" then
