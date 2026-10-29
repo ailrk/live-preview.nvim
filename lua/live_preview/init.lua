@@ -90,15 +90,15 @@ end
 
 local function write_index(dir)
 	local dst = vim.fs.joinpath(dir, index_name)
-	local src = file.resolve_asset("assets/index.html")
+	local src = file.resolve_asset("assets/live_preview/index.html")
 	if not src then
-		error("Could not locate assets/index.html in runtimepath. Make sure the plugin ships it.")
+		error("Could not locate assets/live_preview/index.html in runtimepath. Make sure the plugin ships it.")
 	end
 	local content = file.read_text(src)
 
-	local style_css = file.resolve_asset("assets/style.css")
+	local style_css = file.resolve_asset("assets/live_preview/style.css")
 	if not style_css then
-		error("Could not locate assets/style.css")
+		error("Could not locate assets/live_preview/style.css")
 	end
 
 	content = content:gsub("__BOTTOM_PADDING__", function() return tostring(M.config.bottom_padding) end)
@@ -129,7 +129,7 @@ local function write_index(dir)
 end
 
 local function write_js(dir)
-    local assets_dir = file.resolve_asset("assets")
+    local assets_dir = file.resolve_asset("assets/live_preview/")
     if not assets_dir then
         vim.notify("Live Preview: Could not locate assets directory", vim.log.levels.WARN)
         return
@@ -138,7 +138,7 @@ local function write_js(dir)
     local ok, err = pcall(function()
         for name, ft in vim.fs.dir(assets_dir) do
             if ft == "file" and name:match("%.js$") then
-                local src = file.resolve_asset("assets/" .. name)
+                local src = file.resolve_asset("assets/live_preview/" .. name)
                 local dst = vim.fs.joinpath(dir, name)
                 if src then
                     local content = file.read_text(src)
@@ -606,7 +606,9 @@ local function cdn_map(p, ...)
             return "https://unpkg.com/@iconify-json/"..p1.."@1/icons.json"
         end
     else
-		vim.notify("Live Preview: no cdn mapping: " .. tostring(p), vim.log.levels.ERROR)
+        vim.schedule(function()
+		    vim.notify("Live Preview: no cdn mapping: " .. tostring(p), vim.log.levels.ERROR)
+        end)
     end
 end
 
