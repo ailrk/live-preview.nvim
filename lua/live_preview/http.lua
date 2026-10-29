@@ -10,7 +10,7 @@
 --- All headers are converted into lower case.
 ------------------------------------------------------------
 
-local util = require("live_preview.server.util")
+local util = require("live_preview.http.util")
 
 local M = {}
 
@@ -117,6 +117,18 @@ function M.parse_request(buf)
     end
 
     return request
+end
+
+--- Asynchronously fetch a URL and return its body content via callback
+---@type fun(url: string, callback: fun(err: string?, body: string?))
+function M.fetch(url, callback)
+    vim.system({ "curl", "-sL", url }, { text = true }, function(result)
+        if result.code ~= 0 then
+            callback((result.stderr or "Failed to fetch URL: ") .. url, nil)
+        else
+            callback(nil, result.stdout)
+        end
+    end)
 end
 
 return M

@@ -1,7 +1,8 @@
 local uv   = vim.loop
-local util = require("live_preview.server.util")
-local http = require("live_preview.server.http")
-local ws = require("live_preview.server.http.ws")
+local util = require("live_preview.http.util")
+local http = require("live_preview.http")
+local ws = require("live_preview.http.ws")
+local file = require("live_preview.file")
 local S = {}
 
 ---@class ServerInstance
@@ -18,6 +19,8 @@ local S = {}
 ---@field token string?
 ---@field protected_paths string[]
 ---@field asset_root string|fun():string?|nil
+---@field cdn_map fun(p: string, ...)[]
+---@field cdn_root string
 ---@field extra_asset_roots string[]
 ---@field fs_event uv.uv_fs_event_t?
 ---@field _fs_events table<string, uv.uv_fs_event_t>?
@@ -304,6 +307,75 @@ local function on_request(inst, sock)
         end
 
         ------------------------------
+        -- CDN
+        ------------------------------
+
+        if path_only:find("^/__live/cdn") then
+            local croot = inst.cdn_root
+            if not croot then
+                return http.http_404(sock, path_only)
+            end
+
+            local sub_path = path_only:match("^/__live/cdn/(.+)")
+            if not sub_path then
+                return http.http_404(sock, path_only)
+            end
+
+            local segments = {}
+            for seg in sub_path:gmatch("[^/]+") do
+                table.insert(segments, util.url_decode(seg))
+            end
+
+            if #segments == 0 then
+                return http.http_404(sock, path_only)
+            end
+
+            local p = segments[1]
+            local extra_params = {}
+            for i = 2, #segments do
+                table.insert(extra_params, segments[i])
+            end
+
+            -- Resolve CDN URL via the instance's cdn_map function
+            local cdn_url = inst.cdn_map(p, unpack(extra_params))
+
+            if not cdn_url then
+                return http.http_404(sock, path_only)
+            end
+
+            -- Create local look-aside cache path structure based on sub_path
+            local cached_file_path = util.joinpath(croot, sub_path)
+
+            -- Check if it's already cached on disk
+            local stat = uv.fs_stat(cached_file_path)
+            if stat and stat.type == "file" then
+                return stream_file(sock, cached_file_path, inst.headers)
+            end
+
+            -- If not cached, fetch it and save it to cached_file_path before
+            -- streaming.
+            http.fetch(cdn_url, function(err, body)
+                if err or not body then
+                    return vim.schedule(function()
+                        http.http_404(sock, path_only)
+                    end)
+                end
+                vim.schedule(function()
+                    local ok, werr = pcall(file.write_text, cached_file_path, body)
+                    if not ok then
+                        vim.notify("live_preview: CDN cache write failed: " .. tostring(werr), vim.log.levels.WARN)
+                        -- Still serve the body even if caching failed
+                        return http.send_response(sock, 200, {
+                            ["Content-Type"] = guess_mime(cached_file_path),
+                        }, body)
+                    end
+                    stream_file(sock, cached_file_path, inst.headers)
+                end)
+            end)
+            return -- fetch takes over the continuation
+        end
+
+        ------------------------------
         -- Serving
         ------------------------------
 
@@ -407,7 +479,10 @@ function S.start(cfg)
         -- (e.g. images referenced from markdown) without serving that
         -- directory as the root. Token-gated whenever token is set.
         asset_root        = cfg.asset_root,
-        extra_asset_roots = cfg.extra_asset_roots
+        extra_asset_roots = cfg.extra_asset_roots,
+
+        cdn_map           = cfg.cdn_map,
+        cdn_root          = cfg.cdn_root
     }
 
     local ok, bind_err = pcall(start_server, inst, tcp)

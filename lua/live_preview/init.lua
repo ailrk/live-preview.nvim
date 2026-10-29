@@ -1,8 +1,9 @@
 -- lua/live_preview/init.lua
 local util = require("live_preview.util")
-local ls_ws = require("live_preview.server.http.ws")
+local ws = require("live_preview.http.ws")
 local ls_server = require("live_preview.server")
-local ls_util = require("live_preview.server.util")
+local ls_util = require("live_preview.http.util")
+local file = require("live_preview.file")
 local M = {}
 
 local content_name = "content.md"
@@ -79,7 +80,7 @@ M._last_cursor = nil
 
 local function ensure_workspace(bufnr)
 	local dir = util.workspace_for_buffer(bufnr)
-	util.mkdirp(dir)
+	file.mkdirp(dir)
 	return dir
 end
 
@@ -89,19 +90,19 @@ end
 
 local function write_index(dir)
 	local dst = vim.fs.joinpath(dir, index_name)
-	local src = util.resolve_asset("assets/index.html")
+	local src = file.resolve_asset("assets/live_preview/index.html")
 	if not src then
-		error("Could not locate assets/index.html in runtimepath. Make sure the plugin ships it.")
+		error("Could not locate assets/live_preview/index.html in runtimepath. Make sure the plugin ships it.")
 	end
-	local content = util.read_text(src)
+	local content = file.read_text(src)
 
-	local style_css = util.resolve_asset("assets/style.css")
+	local style_css = file.resolve_asset("assets/live_preview/style.css")
 	if not style_css then
-		error("Could not locate assets/style.css")
+		error("Could not locate assets/live_preview/style.css")
 	end
 
 	content = content:gsub("__BOTTOM_PADDING__", function() return tostring(M.config.bottom_padding) end)
-	content = content:gsub("__STYLE_CSS__", function() return util.read_text(style_css) end)
+	content = content:gsub("__STYLE_CSS__", function() return file.read_text(style_css) end)
 	content = content:gsub("__THEME__", function() return M.config.default_theme end)
 	content = content:gsub("__ALLOW_HTML__", function() return M.config.allow_raw_html ~= false and "true" or "false" end)
 	content = content:gsub("__YAML_MODE__", function()
@@ -113,7 +114,7 @@ local function write_index(dir)
 	-- Inline custom CSS after the bundled styles so user rules win the cascade.
 	if M.config.custom_css and M.config.custom_css ~= "" then
 		local css_src = vim.fn.expand(M.config.custom_css)
-		local ok, css = pcall(util.read_text, css_src)
+		local ok, css = pcall(file.read_text, css_src)
 		if ok and css then
 			content = content:gsub("</head>", function()
 				return "<style>\n" .. css .. "\n</style>\n</head>"
@@ -123,12 +124,12 @@ local function write_index(dir)
 		end
 	end
 
-	util.write_text(dst, content)
+	file.write_text(dst, content)
 	return dst
 end
 
 local function write_js(dir)
-    local assets_dir = util.resolve_asset("assets")
+    local assets_dir = file.resolve_asset("assets/live_preview/")
     if not assets_dir then
         vim.notify("Live Preview: Could not locate assets directory", vim.log.levels.WARN)
         return
@@ -137,11 +138,11 @@ local function write_js(dir)
     local ok, err = pcall(function()
         for name, ft in vim.fs.dir(assets_dir) do
             if ft == "file" and name:match("%.js$") then
-                local src = util.resolve_asset("assets/" .. name)
+                local src = file.resolve_asset("assets/live_preview/" .. name)
                 local dst = vim.fs.joinpath(dir, name)
                 if src then
-                    local content = util.read_text(src)
-                    util.write_text(dst, content)
+                    local content = file.read_text(src)
+                    file.write_text(dst, content)
                 end
             end
         end
@@ -281,7 +282,7 @@ end
 
 local function write_content(dir, text, bufnr)
 	local path = vim.fs.joinpath(dir, content_name)
-	util.write_text(path, text)
+	file.write_text(path, text)
 	-- Sidecar recording the source file's directory. The server's asset
 	-- route resolves relative image paths against it, and re-reads it per
 	-- request so buffer switches retarget it.
@@ -289,7 +290,7 @@ local function write_content(dir, text, bufnr)
 		local name = vim.api.nvim_buf_get_name(bufnr)
 		local src_dir = name ~= "" and vim.fs.dirname(name) or nil
 		if src_dir and src_dir ~= "" then
-			pcall(util.write_text, vim.fs.joinpath(dir, "asset_root"), src_dir)
+			pcall(file.write_text, vim.fs.joinpath(dir, "asset_root"), src_dir)
 		end
 	end
 	return path
@@ -314,7 +315,7 @@ local function maybe_refresh(bufnr)
 		-- cursor message held back for this tick is released.
 		M._written_tick[bufnr] = tick
 		if M._server_instance then
-			pcall(ls_ws.broadcast, M._server_instance, { type = "tick", tick = tick })
+			pcall(ws.broadcast, M._server_instance, { type = "tick", tick = tick })
 		end
 		return false
 	end
@@ -393,7 +394,7 @@ local function send_cursor_sync(bufnr, force, settled)
 	M._last_cursor = { line = pos[1], col = pos[2], mode = mode, text = text }
 
 	if M._server_instance then
-		local ok, err = pcall(ls_ws.broadcast, M._server_instance, {
+		local ok, err = pcall(ws.broadcast, M._server_instance, {
 			type = "cursor",
             -- 0-based line in content.md
 			line = pos[1] - 1 + offset,
@@ -548,6 +549,70 @@ local function set_follow_autocmd()
 end
 
 ---------------------------------------------------------------------------
+-- CDN
+---------------------------------------------------------------------------
+
+local function cdn_map(p, ...)
+    local params = {...}
+    if #params == 0 then
+        if "github-dark.min.css" == p then
+            return "https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github-dark.min.css"
+        end
+        if "github.min.css" == p then
+            return "https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github.min.css"
+        end
+        if "katex.min.css" == p then
+            return "https://cdn.jsdelivr.net/npm/katex@0.16.28/dist/katex.min.css"
+        end
+        if "texmath.css" == p then
+            return "https://cdn.jsdelivr.net/npm/markdown-it-texmath@1.0.0/css/texmath.css"
+        end
+        if "markdown-it.min.js" == p then
+            return "https://cdn.jsdelivr.net/npm/markdown-it@14/dist/markdown-it.min.js"
+        end
+        if "morphdom-umd.min.js" == p then
+            return "https://cdn.jsdelivr.net/npm/morphdom@2/dist/morphdom-umd.min.js"
+        end
+        if "highlight.min.js" == p then
+            return "https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/highlight.min.js"
+        end
+        if "markdown-it-emoji.min.js" == p then
+            return "https://cdn.jsdelivr.net/npm/markdown-it-emoji@3.0.0/dist/markdown-it-emoji.min.js"
+        end
+        if "markdown-it-footnote.min.js" == p then
+            return "https://cdn.jsdelivr.net/npm/markdown-it-footnote@4.0.0/dist/markdown-it-footnote.min.js"
+        end
+        if "markdown-it-task-lists.min.js" == p then
+            return "https://cdn.jsdelivr.net/npm/markdown-it-task-lists@2.1.1/dist/markdown-it-task-lists.min.js"
+        end
+        if "katex.min.js" == p then
+            return "https://cdn.jsdelivr.net/npm/katex@0.16.28/dist/katex.min.js"
+        end
+        if "markdownItAnchor.umd.js" == p then
+            return "https://unpkg.com/markdown-it-anchor@9.2.0/dist/markdownItAnchor.umd.js"
+        end
+        if "texmath.js" == p then
+            return "https://cdn.jsdelivr.net/npm/markdown-it-texmath@1.0.0/texmath.js"
+        end
+        if "markdown-it-github-alerts.mjs" == p then
+            return "https://unpkg.com/markdown-it-github-alerts@1.0.1/dist/index.mjs"
+        end
+        if "mermaid.esm.min.mjs" == p then
+            return "https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs"
+        end
+    elseif #params == 1 then
+        local p1 = params[1]
+        if "iconify-json" == p then
+            return "https://unpkg.com/@iconify-json/"..p1.."@1/icons.json"
+        end
+    else
+        vim.schedule(function()
+		    vim.notify("Live Preview: no cdn mapping: " .. tostring(p), vim.log.levels.ERROR)
+        end)
+    end
+end
+
+---------------------------------------------------------------------------
 -- Public API
 ---------------------------------------------------------------------------
 
@@ -585,9 +650,11 @@ function M.start()
 		return
 	end
 
-    util.mkdirp(util.shared_workspace())
+    -- Ensure workspace
 	local dir = ensure_workspace(bufnr)
 	M._workspace_dir = dir
+
+    local shared_dir = util.shared_workspace()
 
 	-- One token per server lifetime, reused across retargets. Must exist
     -- before writing index.html because it is baked in via __LIVE_TOKEN__.
@@ -596,8 +663,8 @@ function M.start()
 	end
 
     -- Shared content. It overwrites old ones.
-    write_js(util.shared_workspace())
-	write_index(util.shared_workspace())
+    write_js(shared_dir)
+	write_index(shared_dir)
 
 	write_content(dir, text, bufnr)
 	M._last_text_by_buf[bufnr] = text
@@ -619,7 +686,7 @@ function M.start()
             -- Makesure shared_workspace is first because index.html serves
             -- from here. The HTTP sersver supports multiple workspaces but
             -- only resolve / to index.html for the first workspace.
-			roots = { util.shared_workspace(), dir },
+			roots = { shared_dir, dir },
 			headers = { ["cache-control"] = "no-cache" },
 			-- The browser sends {type="hello"} when its websocket opens; reply
 			-- with the current cursor so a fresh/reconnected tab is in sync.
@@ -631,11 +698,13 @@ function M.start()
 			asset_root = function()
 				local ws = M._workspace_dir
 				if not ws then return nil end
-				local ok_read, data = pcall(util.read_text, vim.fs.joinpath(ws, "asset_root"))
+				local ok_read, data = pcall(file.read_text, vim.fs.joinpath(ws, "asset_root"))
 				if not ok_read or not data or data == "" then return nil end
 				return (data:gsub("%s+$", ""))
 			end,
 			extra_asset_roots = M.config.extra_asset_roots,
+            cdn_map = cdn_map,
+            cdn_root = vim.fs.joinpath(shared_dir, "cdn")
 		})
 		if not ok then
 			vim.notify(
@@ -657,7 +726,7 @@ function M.start()
 		end
 	else
 		-- Server already running in this nvim: retarget to this buffer's workspace
-		pcall(ls_server.update_target, M._server_instance, { util.shared_workspace(), dir })
+		pcall(ls_server.update_target, M._server_instance, { shared_dir, dir })
 		pcall(ls_server.reload, M._server_instance, content_name, tick)
 
 		if type(M.config.hooks.on_start) == "function" then

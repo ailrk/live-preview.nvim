@@ -1,11 +1,6 @@
 local uv = vim.loop
 local U = {}
 
-function U.notify(msg, opts, level)
-    if opts and opts.notify == false then return end
-    vim.notify(msg, (level and vim.log.levels[level]) or vim.log.levels.INFO, { title = "live-server.nvim" })
-end
-
 function U.joinpath(...)
     local sep = package.config:sub(1, 1)
     return table.concat({ ... }, sep)
@@ -71,22 +66,6 @@ end
 function U.html_escape(s)
     local map = { ['&'] = '&amp;', ['<'] = '&lt;', ['>'] = '&gt;', ['"'] = '&quot;', ["'"] = '&#39;' }
     return (tostring(s):gsub("[&<>\"]", map):gsub("'", map["'"]))
-end
-
--- Open URL in default browser (portable)
-function U.open_browser(url)
-    if vim.ui and vim.ui.open then
-        local ok = pcall(vim.ui.open, url)
-        if ok then return end
-    end
-    local sys = (jit and jit.os) or uv.os_uname().sysname
-    if sys == "Windows" or sys == "Windows_NT" then
-        vim.schedule(function() vim.fn.jobstart({ "cmd.exe", "/c", "start", "", url }, { detach = true }) end)
-    elseif sys == "OSX" or sys == "Darwin" then
-        vim.schedule(function() vim.fn.jobstart({ "open", url }, { detach = true }) end)
-    else
-        vim.schedule(function() vim.fn.jobstart({ "xdg-open", url }, { detach = true }) end)
-    end
 end
 
 return U
