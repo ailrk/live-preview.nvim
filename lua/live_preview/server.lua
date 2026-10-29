@@ -95,7 +95,7 @@ local function sanitize_and_map(norm_path, root_real)
     end
     local joined = util.joinpath(root_real, (norm_path:gsub("^/+", "")))
     local real = uv.fs_realpath(joined)
-    print(real, root_real)
+    if not real then return nil end
     if not util.path_has_prefix(real, root_real) then return nil end
     return real
 end
