@@ -86,14 +86,13 @@ end
 -- Map an already-normalized path (see normalize_path) to a real file under
 -- root. realpath containment stays as defense in depth against anything
 -- normalization missed (symlinks, filesystem-level surprises).
----@type fun(norm_path: string, root_real: string): string|uv.uv_fs_t?
+---@type fun(norm_path: string, root_real: string): string?
 local function sanitize_and_map(norm_path, root_real)
     if norm_path == "/" then
         return root_real
     end
     local joined = util.joinpath(root_real, (norm_path:gsub("^/+", "")))
-    local ok, real = pcall(uv.fs_realpath, joined)
-    if not ok or not real then return nil end
+    local real = uv.fs_realpath(joined)
     if not util.path_has_prefix(real, root_real) then return nil end
     return real
 end
