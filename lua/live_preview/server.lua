@@ -355,14 +355,24 @@ local function on_request(inst, sock)
             -- If not cached, fetch it and save it to cached_file_path before
             -- streaming.
             http.fetch(cdn_url, function(err, body)
-                if err or not body then return http.http_404(sock, path_only) end
+                if err or not body then
+                    return vim.schedule(function()
+                        http.http_404(sock, path_only)
+                    end)
+                end
                 vim.schedule(function()
-                    file.write_text(cached_file_path, body) -- ensure parent dirs exist
+                    local ok, werr = pcall(file.write_text, cached_file_path, body)
+                    if not ok then
+                        vim.notify("live_preview: CDN cache write failed: " .. tostring(werr), vim.log.levels.WARN)
+                        -- Still serve the body even if caching failed
+                        return http.send_response(sock, 200, {
+                            ["Content-Type"] = guess_mime(cached_file_path),
+                        }, body)
+                    end
                     stream_file(sock, cached_file_path, inst.headers)
                 end)
             end)
-
-            return http.http_404(sock, path_only)
+            return -- fetch takes over the continuation
         end
 
         ------------------------------
@@ -376,6 +386,8 @@ local function on_request(inst, sock)
             local root_real = uv.fs_realpath(root)
             if not root_real then error("Invalid root: " .. tostring(root)) end
             mapped = sanitize_and_map(path_only, root_real)
+            vim.print("live_preview/server.lua:379 on_request: ", { path_only})  -- @print
+            vim.print("live_preview/server.lua:379 on_request: ", { path_only})  -- @print
             if mapped then
                 st = uv.fs_stat(mapped)
                 if st and st.type == "directory" then

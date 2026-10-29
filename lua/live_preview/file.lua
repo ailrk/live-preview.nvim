@@ -42,4 +42,30 @@ function M.copy_file(src, dst)
 	M.write_text(dst, data)
 end
 
+---Resolve a file shipped with the plugin using runtimepath first.
+function M.resolve_asset(rel)
+	local sep = sep
+
+	-- Path math from this file's location: always points at *this* plugin.
+	local info = debug.getinfo(1, "S")
+	local this = type(info.source) == "string" and info.source or ""
+	if this:sub(1, 1) == "@" then
+		this = this:sub(2)
+	end
+	local root = this:match("(.-)" .. sep .. "lua" .. sep .. "live_preview" .. sep .. "file%.lua$")
+	if root then
+		local candidate = table.concat({ root, rel }, sep)
+		if vim.loop.fs_stat(candidate) then -- file OR directory
+			return candidate
+		end
+	end
+
+	-- Fallback: runtimepath discovery
+	local hits = vim.api.nvim_get_runtime_file(rel, false)
+	if hits and #hits > 0 then
+		return hits[1]
+	end
+	return nil
+end
+
 return M

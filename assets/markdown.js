@@ -1,5 +1,7 @@
 import g, { $ } from "./global.js";
-import markdownItGithubAlerts from '/__live/cdn/markdown-it-github-alerts.mjs';
+// import markdownItGithubAlerts from '/__live/cdn/markdown-it-github-alerts.mjs';
+import markdownItGithubAlerts from 'https://unpkg.com/markdown-it-github-alerts@1.0.1/dist/index.mjs';
+
 
 const YAML_MODE = document.documentElement.dataset.yamlMode || 'panel';
 export let md = null;

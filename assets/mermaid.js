@@ -1,4 +1,5 @@
-import mermaid from '/__live/cdn/mermaid.esm.min.mjs';
+// import mermaid from '/__live/cdn/mermaid.esm.min.mjs';
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs';
 export { mermaid };
 
 let mermaidIdCounter = 0;

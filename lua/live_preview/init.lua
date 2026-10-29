@@ -90,13 +90,13 @@ end
 
 local function write_index(dir)
 	local dst = vim.fs.joinpath(dir, index_name)
-	local src = util.resolve_asset("assets/index.html")
+	local src = file.resolve_asset("assets/index.html")
 	if not src then
 		error("Could not locate assets/index.html in runtimepath. Make sure the plugin ships it.")
 	end
 	local content = file.read_text(src)
 
-	local style_css = util.resolve_asset("assets/style.css")
+	local style_css = file.resolve_asset("assets/style.css")
 	if not style_css then
 		error("Could not locate assets/style.css")
 	end
@@ -129,7 +129,7 @@ local function write_index(dir)
 end
 
 local function write_js(dir)
-    local assets_dir = util.resolve_asset("assets")
+    local assets_dir = file.resolve_asset("assets")
     if not assets_dir then
         vim.notify("Live Preview: Could not locate assets directory", vim.log.levels.WARN)
         return
@@ -138,7 +138,7 @@ local function write_js(dir)
     local ok, err = pcall(function()
         for name, ft in vim.fs.dir(assets_dir) do
             if ft == "file" and name:match("%.js$") then
-                local src = util.resolve_asset("assets/" .. name)
+                local src = file.resolve_asset("assets/" .. name)
                 local dst = vim.fs.joinpath(dir, name)
                 if src then
                     local content = file.read_text(src)
@@ -549,7 +549,7 @@ local function set_follow_autocmd()
 end
 
 ---------------------------------------------------------------------------
--- CDN Map
+-- CDN
 ---------------------------------------------------------------------------
 
 local function cdn_map(p, ...)

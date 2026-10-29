@@ -1,35 +1,6 @@
 -- lua/live_preview/util.lua
 local M = {}
 
-local file = require("live_preview.file")
-
----Resolve a file shipped with the plugin using runtimepath first.
----@param rel string
----@return string|nil
-function M.resolve_asset(rel)
-    local sep = file.sep
-	-- Prefer runtimepath discovery (robust across plugin managers and symlinks)
-	local hits = vim.api.nvim_get_runtime_file(rel, false)
-	if hits and #hits > 0 then
-		return hits[1]
-	end
-
-	-- Fallback to path math from this file location
-	local info = debug.getinfo(1, "S")
-	local this = type(info.source) == "string" and info.source or ""
-	if this:sub(1, 1) == "@" then
-		this = this:sub(2)
-	end
-	local root = this:match("(.-)" .. sep .. "lua" .. sep .. "live_preview" .. sep .. "util%.lua$")
-	if root then
-		local candidate = table.concat({ root, rel }, sep)
-		if file.file_exists(candidate) then
-			return candidate
-		end
-	end
-	return nil
-end
-
 -- Launch a detached command; true when the process spawned.
 -- (vim.fn.jobstart raises for a non-executable command, so pcall it.)
 local function try_launch(cmd, opts)
