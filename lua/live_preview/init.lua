@@ -594,8 +594,7 @@ function M.start()
 		M._token = ls_util.random_token(16)
 	end
 
-    -- Shared content
-    -- @note it currently overwrites
+    -- Shared content. It overwrites old ones.
     write_js(util.shared_workspace())
 	write_index(util.shared_workspace())
 
@@ -613,8 +612,6 @@ function M.start()
         "^/" .. vim.pesc(index_name) .. "$",
     }
 
-	local index_path = vim.fs.joinpath(dir, index_name)
-
 	if not M._server_instance then
 		local ok, inst = pcall(ls_server.start, {
 			host = M.config.host,
@@ -622,7 +619,6 @@ function M.start()
             -- from here. The HTTP sersver supports multiple workspaces but
             -- only resolve / to index.html for the first workspace.
 			roots = { util.shared_workspace(), dir },
-			default_index = index_path,
 			headers = { ["cache-control"] = "no-cache" },
 			-- The browser sends {type="hello"} when its websocket opens; reply
 			-- with the current cursor so a fresh/reconnected tab is in sync.
