@@ -1,8 +1,8 @@
 -- lua/live_preview/init.lua
 local util = require("live_preview.util")
-local ls_ws = require("live_preview.server.http.ws")
+local ws = require("live_preview.http.ws")
 local ls_server = require("live_preview.server")
-local ls_util = require("live_preview.server.util")
+local ls_util = require("live_preview.http.util")
 local M = {}
 
 local content_name = "content.md"
@@ -314,7 +314,7 @@ local function maybe_refresh(bufnr)
 		-- cursor message held back for this tick is released.
 		M._written_tick[bufnr] = tick
 		if M._server_instance then
-			pcall(ls_ws.broadcast, M._server_instance, { type = "tick", tick = tick })
+			pcall(ws.broadcast, M._server_instance, { type = "tick", tick = tick })
 		end
 		return false
 	end
@@ -393,7 +393,7 @@ local function send_cursor_sync(bufnr, force, settled)
 	M._last_cursor = { line = pos[1], col = pos[2], mode = mode, text = text }
 
 	if M._server_instance then
-		local ok, err = pcall(ls_ws.broadcast, M._server_instance, {
+		local ok, err = pcall(ws.broadcast, M._server_instance, {
 			type = "cursor",
             -- 0-based line in content.md
 			line = pos[1] - 1 + offset,

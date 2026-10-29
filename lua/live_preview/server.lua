@@ -1,7 +1,7 @@
 local uv   = vim.loop
-local util = require("live_preview.server.util")
-local http = require("live_preview.server.http")
-local ws = require("live_preview.server.http.ws")
+local util = require("live_preview.http.util")
+local http = require("live_preview.http")
+local ws = require("live_preview.http.ws")
 local S = {}
 
 ---@class ServerInstance
@@ -95,6 +95,7 @@ local function sanitize_and_map(norm_path, root_real)
     end
     local joined = util.joinpath(root_real, (norm_path:gsub("^/+", "")))
     local real = uv.fs_realpath(joined)
+    print(real, root_real)
     if not util.path_has_prefix(real, root_real) then return nil end
     return real
 end
@@ -308,13 +309,57 @@ local function on_request(inst, sock)
         -- CDN
         ------------------------------
 
-        if path_only == "/__live/cdn" then
+        if path_only:find("^/__live/cdn") then
             local croot = inst.cdn_root
-            -- @todo
-            -- read parameters
-            -- pass to cdn_map to get the url
-            -- check if it's cached.
-            -- look aside cache
+            if not croot then
+                return http.http_404(sock, path_only)
+            end
+
+            local sub_path = path_only:match("^/__live/cdn/(.+)")
+            if not sub_path then
+                return http.http_404(sock, path_only)
+            end
+
+            local segments = {}
+            for seg in sub_path:gmatch("[^/]+") do
+                table.insert(segments, util.url_decode(seg))
+            end
+
+            if #segments == 0 then
+                return http.http_404(sock, path_only)
+            end
+
+            local p = segments[1]
+            local extra_params = {}
+            for i = 2, #segments do
+                table.insert(extra_params, segments[i])
+            end
+
+            -- Resolve CDN URL via the instance's cdn_map function
+            local cdn_url = inst.cdn_map(p, unpack(extra_params))
+
+            if not cdn_url then
+                return http.http_404(sock, path_only)
+            end
+
+            -- Create local look-aside cache path structure based on sub_path
+            local cached_file_path = util.joinpath(croot, sub_path)
+
+            -- Check if it's already cached on disk
+            local stat = uv.fs_stat(cached_file_path)
+            if stat and stat.type == "file" then
+                return stream_file(sock, cached_file_path, inst.headers)
+            end
+
+            -- If not cached, fetch it and save it to cached_file_path before
+            -- streaming.
+            http.fetch(cdn_url, function(err, body)
+                if err or not body then return http.http_404(sock, path_only) end
+                util.write_file(cached_file_path, body) -- ensure parent dirs exist
+                stream_file(sock, cached_file_path, inst.headers)
+            end)
+
+            return http.http_404(sock, path_only)
         end
 
         ------------------------------

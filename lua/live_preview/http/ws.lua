@@ -3,8 +3,8 @@
 ---
 --- Websocket implementation.
 ------------------------------------------------------------
-local http = require("live_preview.server.http")
-local sha1 = require("live_preview.server.sha1")
+local http = require("live_preview.http")
+local sha1 = require("live_preview.http.sha1")
 local bit = require("bit")
 local M = {}
 
