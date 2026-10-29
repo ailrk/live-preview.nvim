@@ -604,6 +604,8 @@ local function cdn_map(p, ...)
         if "iconify-json" == p then
             return "https://unpkg.com/@iconify-json/"..p1.."@1/icons.json"
         end
+    else
+		vim.notify("Live Preview: no cdn mapping: " .. tostring(p), vim.log.levels.ERROR)
     end
 end
 
@@ -695,7 +697,8 @@ function M.start()
 				return (data:gsub("%s+$", ""))
 			end,
 			extra_asset_roots = M.config.extra_asset_roots,
-            cdn_map = cdn_map
+            cdn_map = cdn_map,
+            cdn_root = vim.fs.joinpath(util.shared_workspace(), "cdn")
 		})
 		if not ok then
 			vim.notify(
