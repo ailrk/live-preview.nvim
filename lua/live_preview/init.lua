@@ -585,6 +585,7 @@ function M.start()
 		return
 	end
 
+    util.mkdirp(util.shared_workspace())
 	local dir = ensure_workspace(bufnr)
 	M._workspace_dir = dir
 
