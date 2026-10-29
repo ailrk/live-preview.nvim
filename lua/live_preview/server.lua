@@ -309,32 +309,35 @@ local function on_request(inst, sock)
 
         -- Map path. Will search roots in the order of cfg.roots
         local mapped = nil
+        local st = nil
         for _, root in ipairs(inst.roots) do
             local root_real = uv.fs_realpath(root)
             if not root_real then error("Invalid root: " .. tostring(root)) end
             mapped = sanitize_and_map(path_only, root_real)
-            if mapped then break end
+            if mapped then
+                st = uv.fs_stat(mapped)
+                if st and st.type == "directory" then
+                    local candidate
+                    for _, iname in ipairs(inst.index_names) do
+                        local try = util.joinpath(mapped, iname)
+                        if uv.fs_stat(try) then candidate = try; break end
+                    end
+                    if candidate and uv.fs_stat(candidate) then
+                        return serve_path(sock, candidate, req.path, inst.headers)
+                    else
+                        goto continue
+                    end
+                elseif st and st.type == "file" then
+                    return serve_path(sock, mapped, req.path, inst.headers)
+                else
+                    goto continue
+                end
+            end
+            ::continue::
         end
 
-        if not mapped then return http.http_404(sock, req.path) end
-
-        local st = uv.fs_stat(mapped)
-        if st and st.type == "directory" then
-            local candidate
-            for _, iname in ipairs(inst.index_names) do
-                local try = util.joinpath(mapped, iname)
-                if uv.fs_stat(try) then candidate = try; break end
-            end
-            if candidate and uv.fs_stat(candidate) then
-                return serve_path(sock, candidate, req.path, inst.headers)
-            else
-                return http.http_404(sock, req.path .. " (no index)")
-            end
-        elseif st and st.type == "file" then
-            return serve_path(sock, mapped, req.path, inst.headers)
-        else
-            return http.http_404(sock, req.path)
-        end
+        -- catch all
+        return http.http_404(sock, req.path)
     end
 end
 
