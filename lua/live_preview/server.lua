@@ -18,6 +18,7 @@ local S = {}
 ---@field token string?
 ---@field protected_paths string[]
 ---@field asset_root string|fun():string?|nil
+---@field cdn_map fun(p: string, ...)[]
 ---@field extra_asset_roots string[]
 ---@field fs_event uv.uv_fs_event_t?
 ---@field _fs_events table<string, uv.uv_fs_event_t>?
@@ -303,6 +304,13 @@ local function on_request(inst, sock)
         end
 
         ------------------------------
+        -- CDN
+        ------------------------------
+
+        if path_only == "/__live/cdn" then
+        end
+
+        ------------------------------
         -- Serving
         ------------------------------
 
@@ -406,7 +414,8 @@ function S.start(cfg)
         -- (e.g. images referenced from markdown) without serving that
         -- directory as the root. Token-gated whenever token is set.
         asset_root        = cfg.asset_root,
-        extra_asset_roots = cfg.extra_asset_roots
+        extra_asset_roots = cfg.extra_asset_roots,
+        cdn_map           = cfg.cdn_map
     }
 
     local ok, bind_err = pcall(start_server, inst, tcp)

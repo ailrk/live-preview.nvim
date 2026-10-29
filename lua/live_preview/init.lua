@@ -548,6 +548,66 @@ local function set_follow_autocmd()
 end
 
 ---------------------------------------------------------------------------
+-- CDN Map
+---------------------------------------------------------------------------
+
+local function cdn_map(p, ...)
+    local params = {...}
+    if #params == 0 then
+        if "github-dark.min.css" == p then
+            return "https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github-dark.min.css"
+        end
+        if "github.min.css" == p then
+            return "https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github.min.css"
+        end
+        if "katex.min.css" == p then
+            return "https://cdn.jsdelivr.net/npm/katex@0.16.28/dist/katex.min.css"
+        end
+        if "texmath.css" == p then
+            return "https://cdn.jsdelivr.net/npm/markdown-it-texmath@1.0.0/css/texmath.css"
+        end
+        if "markdown-it.min.js" == p then
+            return "https://cdn.jsdelivr.net/npm/markdown-it@14/dist/markdown-it.min.js"
+        end
+        if "morphdom-umd.min.js" == p then
+            return "https://cdn.jsdelivr.net/npm/morphdom@2/dist/morphdom-umd.min.js"
+        end
+        if "highlight.min.js" == p then
+            return "https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/highlight.min.js"
+        end
+        if "markdown-it-emoji.min.js" == p then
+            return "https://cdn.jsdelivr.net/npm/markdown-it-emoji@3.0.0/dist/markdown-it-emoji.min.js"
+        end
+        if "markdown-it-footnote.min.js" == p then
+            return "https://cdn.jsdelivr.net/npm/markdown-it-footnote@4.0.0/dist/markdown-it-footnote.min.js"
+        end
+        if "markdown-it-task-lists.min.js" == p then
+            return "https://cdn.jsdelivr.net/npm/markdown-it-task-lists@2.1.1/dist/markdown-it-task-lists.min.js"
+        end
+        if "katex.min.js" == p then
+            return "https://cdn.jsdelivr.net/npm/katex@0.16.28/dist/katex.min.js"
+        end
+        if "markdownItAnchor.umd.js" == p then
+            return "https://unpkg.com/markdown-it-anchor@9.2.0/dist/markdownItAnchor.umd.js"
+        end
+        if "texmath.js" == p then
+            return "https://cdn.jsdelivr.net/npm/markdown-it-texmath@1.0.0/texmath.js"
+        end
+        if "markdown-it-github-alerts.mjs" == p then
+            return "https://unpkg.com/markdown-it-github-alerts@1.0.1/dist/index.mjs"
+        end
+        if "mermaid.esm.min.mjs" == p then
+            return "https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs"
+        end
+    elseif #params == 1 then
+        local p1 = params[1]
+        if "iconify-json" == p then
+            return "https://unpkg.com/@iconify-json/"..p1.."@1/icons.json"
+        end
+    end
+end
+
+---------------------------------------------------------------------------
 -- Public API
 ---------------------------------------------------------------------------
 
@@ -635,6 +695,7 @@ function M.start()
 				return (data:gsub("%s+$", ""))
 			end,
 			extra_asset_roots = M.config.extra_asset_roots,
+            cdn_map = cdn_map
 		})
 		if not ok then
 			vim.notify(
