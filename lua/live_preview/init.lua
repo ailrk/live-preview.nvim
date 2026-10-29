@@ -3,6 +3,7 @@ local util = require("live_preview.util")
 local ws = require("live_preview.http.ws")
 local ls_server = require("live_preview.server")
 local ls_util = require("live_preview.http.util")
+local file = require("live_preview.file")
 local M = {}
 
 local content_name = "content.md"
@@ -79,7 +80,7 @@ M._last_cursor = nil
 
 local function ensure_workspace(bufnr)
 	local dir = util.workspace_for_buffer(bufnr)
-	util.mkdirp(dir)
+	file.mkdirp(dir)
 	return dir
 end
 
@@ -93,7 +94,7 @@ local function write_index(dir)
 	if not src then
 		error("Could not locate assets/index.html in runtimepath. Make sure the plugin ships it.")
 	end
-	local content = util.read_text(src)
+	local content = file.read_text(src)
 
 	local style_css = util.resolve_asset("assets/style.css")
 	if not style_css then
@@ -101,7 +102,7 @@ local function write_index(dir)
 	end
 
 	content = content:gsub("__BOTTOM_PADDING__", function() return tostring(M.config.bottom_padding) end)
-	content = content:gsub("__STYLE_CSS__", function() return util.read_text(style_css) end)
+	content = content:gsub("__STYLE_CSS__", function() return file.read_text(style_css) end)
 	content = content:gsub("__THEME__", function() return M.config.default_theme end)
 	content = content:gsub("__ALLOW_HTML__", function() return M.config.allow_raw_html ~= false and "true" or "false" end)
 	content = content:gsub("__YAML_MODE__", function()
@@ -113,7 +114,7 @@ local function write_index(dir)
 	-- Inline custom CSS after the bundled styles so user rules win the cascade.
 	if M.config.custom_css and M.config.custom_css ~= "" then
 		local css_src = vim.fn.expand(M.config.custom_css)
-		local ok, css = pcall(util.read_text, css_src)
+		local ok, css = pcall(file.read_text, css_src)
 		if ok and css then
 			content = content:gsub("</head>", function()
 				return "<style>\n" .. css .. "\n</style>\n</head>"
@@ -123,7 +124,7 @@ local function write_index(dir)
 		end
 	end
 
-	util.write_text(dst, content)
+	file.write_text(dst, content)
 	return dst
 end
 
@@ -140,8 +141,8 @@ local function write_js(dir)
                 local src = util.resolve_asset("assets/" .. name)
                 local dst = vim.fs.joinpath(dir, name)
                 if src then
-                    local content = util.read_text(src)
-                    util.write_text(dst, content)
+                    local content = file.read_text(src)
+                    file.write_text(dst, content)
                 end
             end
         end
@@ -281,7 +282,7 @@ end
 
 local function write_content(dir, text, bufnr)
 	local path = vim.fs.joinpath(dir, content_name)
-	util.write_text(path, text)
+	file.write_text(path, text)
 	-- Sidecar recording the source file's directory. The server's asset
 	-- route resolves relative image paths against it, and re-reads it per
 	-- request so buffer switches retarget it.
@@ -289,7 +290,7 @@ local function write_content(dir, text, bufnr)
 		local name = vim.api.nvim_buf_get_name(bufnr)
 		local src_dir = name ~= "" and vim.fs.dirname(name) or nil
 		if src_dir and src_dir ~= "" then
-			pcall(util.write_text, vim.fs.joinpath(dir, "asset_root"), src_dir)
+			pcall(file.write_text, vim.fs.joinpath(dir, "asset_root"), src_dir)
 		end
 	end
 	return path
@@ -647,9 +648,11 @@ function M.start()
 		return
 	end
 
-    util.mkdirp(util.shared_workspace())
+    -- Ensure workspace
 	local dir = ensure_workspace(bufnr)
 	M._workspace_dir = dir
+
+    local shared_dir = util.shared_workspace()
 
 	-- One token per server lifetime, reused across retargets. Must exist
     -- before writing index.html because it is baked in via __LIVE_TOKEN__.
@@ -658,8 +661,8 @@ function M.start()
 	end
 
     -- Shared content. It overwrites old ones.
-    write_js(util.shared_workspace())
-	write_index(util.shared_workspace())
+    write_js(shared_dir)
+	write_index(shared_dir)
 
 	write_content(dir, text, bufnr)
 	M._last_text_by_buf[bufnr] = text
@@ -681,7 +684,7 @@ function M.start()
             -- Makesure shared_workspace is first because index.html serves
             -- from here. The HTTP sersver supports multiple workspaces but
             -- only resolve / to index.html for the first workspace.
-			roots = { util.shared_workspace(), dir },
+			roots = { shared_dir, dir },
 			headers = { ["cache-control"] = "no-cache" },
 			-- The browser sends {type="hello"} when its websocket opens; reply
 			-- with the current cursor so a fresh/reconnected tab is in sync.
@@ -693,13 +696,13 @@ function M.start()
 			asset_root = function()
 				local ws = M._workspace_dir
 				if not ws then return nil end
-				local ok_read, data = pcall(util.read_text, vim.fs.joinpath(ws, "asset_root"))
+				local ok_read, data = pcall(file.read_text, vim.fs.joinpath(ws, "asset_root"))
 				if not ok_read or not data or data == "" then return nil end
 				return (data:gsub("%s+$", ""))
 			end,
 			extra_asset_roots = M.config.extra_asset_roots,
             cdn_map = cdn_map,
-            cdn_root = vim.fs.joinpath(util.shared_workspace(), "cdn")
+            cdn_root = vim.fs.joinpath(shared_dir, "cdn")
 		})
 		if not ok then
 			vim.notify(
@@ -721,7 +724,7 @@ function M.start()
 		end
 	else
 		-- Server already running in this nvim: retarget to this buffer's workspace
-		pcall(ls_server.update_target, M._server_instance, { util.shared_workspace(), dir })
+		pcall(ls_server.update_target, M._server_instance, { shared_dir, dir })
 		pcall(ls_server.reload, M._server_instance, content_name, tick)
 
 		if type(M.config.hooks.on_start) == "function" then

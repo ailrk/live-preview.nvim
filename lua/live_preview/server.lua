@@ -2,6 +2,7 @@ local uv   = vim.loop
 local util = require("live_preview.http.util")
 local http = require("live_preview.http")
 local ws = require("live_preview.http.ws")
+local file = require("live_preview.file")
 local S = {}
 
 ---@class ServerInstance
@@ -355,8 +356,10 @@ local function on_request(inst, sock)
             -- streaming.
             http.fetch(cdn_url, function(err, body)
                 if err or not body then return http.http_404(sock, path_only) end
-                util.write_file(cached_file_path, body) -- ensure parent dirs exist
-                stream_file(sock, cached_file_path, inst.headers)
+                vim.schedule(function()
+                    file.write_text(cached_file_path, body) -- ensure parent dirs exist
+                    stream_file(sock, cached_file_path, inst.headers)
+                end)
             end)
 
             return http.http_404(sock, path_only)

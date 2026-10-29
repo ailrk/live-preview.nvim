@@ -1,4 +1,4 @@
-import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs';
+import mermaid from '/__live/cdn/mermaid.esm.min.mjs';
 export { mermaid };
 
 let mermaidIdCounter = 0;
@@ -16,7 +16,7 @@ function detectPacks(src) {
 async function ensurePack(name) {
     if (loadedPacks.has(name)) return;
     try {
-        const loader = () => fetch(`https://unpkg.com/@iconify-json/${name}@1/icons.json`).then(r => r.json());
+        const loader = () => fetch(`/__live/iconify-json/${name}`).then(r => r.json());
         await mermaid.registerIconPacks([{ name, loader }]);
         loadedPacks.add(name);
     } catch (_) { }

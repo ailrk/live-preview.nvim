@@ -119,4 +119,16 @@ function M.parse_request(buf)
     return request
 end
 
+--- Asynchronously fetch a URL and return its body content via callback
+---@type fun(url: string, callback: fun(err: string?, body: string?))
+function M.fetch(url, callback)
+    vim.system({ "curl", "-sL", url }, { text = true }, function(result)
+        if result.code ~= 0 then
+            callback((result.stderr or "Failed to fetch URL: ") .. url, nil)
+        else
+            callback(nil, result.stdout)
+        end
+    end)
+end
+
 return M
