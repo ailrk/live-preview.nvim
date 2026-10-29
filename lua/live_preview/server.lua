@@ -315,6 +315,7 @@ local function on_request(inst, sock)
             mapped = sanitize_and_map(path_only, root_real)
             if mapped then break end
         end
+
         if not mapped then return http.http_404(sock, req.path) end
 
         local st = uv.fs_stat(mapped)
@@ -418,8 +419,8 @@ function S.stop(inst)
     pcall(function() inst.handle:close() end)
 end
 
-function S.update_target(inst, new_root)
-    inst.root = new_root
+function S.update_target(inst, new_roots)
+    inst.roots = new_roots
 end
 
 -- Live-reload controls

@@ -594,8 +594,11 @@ function M.start()
 		M._token = ls_util.random_token(16)
 	end
 
-    write_js(dir)
-	write_index(dir)
+    -- Shared content
+    -- @note it currently overwrites
+    write_js(util.shared_workspace())
+	write_index(util.shared_workspace())
+
 	write_content(dir, text, bufnr)
 	M._last_text_by_buf[bufnr] = text
     M._written_tick[bufnr] = tick
@@ -615,7 +618,10 @@ function M.start()
 	if not M._server_instance then
 		local ok, inst = pcall(ls_server.start, {
 			host = M.config.host,
-			roots = { dir },
+            -- Makesure shared_workspace is first because index.html serves
+            -- from here. The HTTP sersver supports multiple workspaces but
+            -- only resolve / to index.html for the first workspace.
+			roots = { util.shared_workspace(), dir },
 			default_index = index_path,
 			headers = { ["cache-control"] = "no-cache" },
 			-- The browser sends {type="hello"} when its websocket opens; reply
@@ -654,7 +660,7 @@ function M.start()
 		end
 	else
 		-- Server already running in this nvim: retarget to this buffer's workspace
-		pcall(ls_server.update_target, M._server_instance, dir)
+		pcall(ls_server.update_target, M._server_instance, { util.shared_workspace(), dir })
 		pcall(ls_server.reload, M._server_instance, content_name, tick)
 
 		if type(M.config.hooks.on_start) == "function" then
