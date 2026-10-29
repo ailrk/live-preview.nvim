@@ -5,6 +5,9 @@ local ls_server = require("live_preview.server")
 local ls_util = require("live_preview.server.util")
 local M = {}
 
+local content_name = "content.md"
+local index_name = "index.html"
+
 M.config = {
 	-- bind address; "0.0.0.0" for network access
 	host = "127.0.0.1",
@@ -13,9 +16,6 @@ M.config = {
     -- nil = system default browser. String for app/binary name (e.g. "Firefox",
     -- "google-chrome").
 	browser = nil,
-
-	content_name = "content.md",
-	index_name = "index.html",
 
 	-- Path to a custom CSS file.
 	custom_css = "",
@@ -88,7 +88,7 @@ end
 ---------------------------------------------------------------------------
 
 local function write_index(dir)
-	local dst = vim.fs.joinpath(dir, M.config.index_name)
+	local dst = vim.fs.joinpath(dir, index_name)
 	local src = util.resolve_asset("assets/index.html")
 	if not src then
 		error("Could not locate assets/index.html in runtimepath. Make sure the plugin ships it.")
@@ -280,7 +280,7 @@ local function get_content_safe(bufnr)
 end
 
 local function write_content(dir, text, bufnr)
-	local path = vim.fs.joinpath(dir, M.config.content_name)
+	local path = vim.fs.joinpath(dir, content_name)
 	util.write_text(path, text)
 	-- Sidecar recording the source file's directory. The server's asset
 	-- route resolves relative image paths against it, and re-reads it per
@@ -325,7 +325,7 @@ local function maybe_refresh(bufnr)
 	M._written_tick[bufnr] = tick
 
 	if M._server_instance then
-		pcall(ls_server.reload, M._server_instance, M.config.content_name, tick)
+		pcall(ls_server.reload, M._server_instance, content_name, tick)
 	end
 
 	return true
@@ -594,8 +594,10 @@ function M.start()
 		M._token = ls_util.random_token(16)
 	end
 
-    write_js(dir)
-	write_index(dir)
+    -- Shared content. It overwrites old ones.
+    write_js(util.shared_workspace())
+	write_index(util.shared_workspace())
+
 	write_content(dir, text, bufnr)
 	M._last_text_by_buf[bufnr] = text
     M._written_tick[bufnr] = tick
@@ -604,19 +606,19 @@ function M.start()
     set_follow_autocmd()
 
     local protected = {
-        "^/" .. vim.pesc(M.config.content_name) .. "$",
+        "^/" .. vim.pesc(content_name) .. "$",
         "^/asset_root$",
         "^/$",
-        "^/" .. vim.pesc(M.config.index_name) .. "$",
+        "^/" .. vim.pesc(index_name) .. "$",
     }
-
-	local index_path = vim.fs.joinpath(dir, M.config.index_name)
 
 	if not M._server_instance then
 		local ok, inst = pcall(ls_server.start, {
 			host = M.config.host,
-			root = dir,
-			default_index = index_path,
+            -- Makesure shared_workspace is first because index.html serves
+            -- from here. The HTTP sersver supports multiple workspaces but
+            -- only resolve / to index.html for the first workspace.
+			roots = { util.shared_workspace(), dir },
 			headers = { ["cache-control"] = "no-cache" },
 			-- The browser sends {type="hello"} when its websocket opens; reply
 			-- with the current cursor so a fresh/reconnected tab is in sync.
@@ -654,8 +656,8 @@ function M.start()
 		end
 	else
 		-- Server already running in this nvim: retarget to this buffer's workspace
-		pcall(ls_server.update_target, M._server_instance, dir, index_path)
-		pcall(ls_server.reload, M._server_instance, M.config.content_name, tick)
+		pcall(ls_server.update_target, M._server_instance, { util.shared_workspace(), dir })
+		pcall(ls_server.reload, M._server_instance, content_name, tick)
 
 		if type(M.config.hooks.on_start) == "function" then
 			M.config.hooks.on_start(browser_url(M._server_instance.port))

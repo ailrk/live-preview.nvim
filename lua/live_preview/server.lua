@@ -8,9 +8,7 @@ local S = {}
 ---@field handle uv.uv_tcp_t
 ---@field host string
 ---@field port number
----@field root string
----@field root_real string
----@field default_index string
+---@field roots string[]
 ---@field headers table<string, string>
 ---@field started_at integer
 ---@field live_debounce integer
@@ -88,14 +86,13 @@ end
 -- Map an already-normalized path (see normalize_path) to a real file under
 -- root. realpath containment stays as defense in depth against anything
 -- normalization missed (symlinks, filesystem-level surprises).
----@type fun(norm_path: string, root_real: string): string|uv.uv_fs_t?
+---@type fun(norm_path: string, root_real: string): string?
 local function sanitize_and_map(norm_path, root_real)
     if norm_path == "/" then
         return root_real
     end
     local joined = util.joinpath(root_real, (norm_path:gsub("^/+", "")))
-    local ok, real = pcall(uv.fs_realpath, joined)
-    if not ok or not real then return nil end
+    local real = uv.fs_realpath(joined)
     if not util.path_has_prefix(real, root_real) then return nil end
     return real
 end
@@ -309,31 +306,37 @@ local function on_request(inst, sock)
         -- Serving
         ------------------------------
 
-        -- Map path
-        local mapped = sanitize_and_map(path_only, inst.root_real)
-        if not mapped then return http.http_404(sock, req.path) end
-
-        local st = uv.fs_stat(mapped)
-        if st and st.type == "directory" then
-            local candidate
-            if inst.default_index and mapped == inst.root_real then
-                candidate = inst.default_index
-            else
-                for _, iname in ipairs(inst.index_names) do
-                    local try = util.joinpath(mapped, iname)
-                    if uv.fs_stat(try) then candidate = try; break end
+        -- Map path. Will search roots in the order of cfg.roots
+        local mapped = nil
+        local st = nil
+        for _, root in ipairs(inst.roots) do
+            local root_real = uv.fs_realpath(root)
+            if not root_real then error("Invalid root: " .. tostring(root)) end
+            mapped = sanitize_and_map(path_only, root_real)
+            if mapped then
+                st = uv.fs_stat(mapped)
+                if st and st.type == "directory" then
+                    local candidate
+                    for _, iname in ipairs(inst.index_names) do
+                        local try = util.joinpath(mapped, iname)
+                        if uv.fs_stat(try) then candidate = try; break end
+                    end
+                    if candidate and uv.fs_stat(candidate) then
+                        return serve_path(sock, candidate, req.path, inst.headers)
+                    else
+                        goto continue
+                    end
+                elseif st and st.type == "file" then
+                    return serve_path(sock, mapped, req.path, inst.headers)
+                else
+                    goto continue
                 end
             end
-            if candidate and uv.fs_stat(candidate) then
-                return serve_path(sock, candidate, req.path, inst.headers)
-            else
-                return http.http_404(sock, req.path .. " (no index)")
-            end
-        elseif st and st.type == "file" then
-            return serve_path(sock, mapped, req.path, inst.headers)
-        else
-            return http.http_404(sock, req.path)
+            ::continue::
         end
+
+        -- catch all
+        return http.http_404(sock, req.path)
     end
 end
 
@@ -372,9 +375,6 @@ function S.start(cfg)
     local actual_port = cfg.port
     actual_port = tcp:getsockname().port
 
-    local root_real = uv.fs_realpath(cfg.root)
-    if not root_real then error("Invalid root: " .. tostring(cfg.root)) end
-
     local headers = vim.tbl_extend("keep", cfg.headers or {}, {})
     if cfg.cors then
         headers["access-control-allow-origin"] = type(cfg.cors) == "string" and cfg.cors or "*"
@@ -385,9 +385,7 @@ function S.start(cfg)
         handle            = tcp,
         port              = actual_port,
         host              = host,
-        root              = cfg.root,
-        root_real         = root_real,
-        default_index     = cfg.default_index,
+        roots             = cfg.roots,
         headers           = headers,
         started_at        = os.time(),
 
@@ -423,10 +421,8 @@ function S.stop(inst)
     pcall(function() inst.handle:close() end)
 end
 
-function S.update_target(inst, new_root, new_index)
-    inst.root = new_root
-    inst.root_real = uv.fs_realpath(new_root) or inst.root_real
-    inst.default_index = new_index
+function S.update_target(inst, new_roots)
+    inst.roots = new_roots
 end
 
 -- Live-reload controls
