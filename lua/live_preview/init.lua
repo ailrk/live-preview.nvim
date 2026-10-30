@@ -503,7 +503,7 @@ local function set_autocmds_for_buffer(bufnr)
         })
     end
 
-	for _, ev in ipairs({ "CursorMoved", "CursorMovedI" }) do
+	for _, ev in ipairs({ "CursorMoved", "CursorMovedI", "TextChangedP" }) do
 		vim.api.nvim_create_autocmd(ev, {
 			group = M._augroup,
 			buffer = bufnr,

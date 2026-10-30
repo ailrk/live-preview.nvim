@@ -1,5 +1,3 @@
-
-
 This is a silly raccoon.
 
 <img src="./Silly-Raccoon.jpg">
