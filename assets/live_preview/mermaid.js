@@ -1,6 +1,3 @@
-import mermaid from '/__live/cdn/mermaid.esm.min.mjs';
-export { mermaid };
-
 let mermaidIdCounter = 0;
 const loadedPacks = new Set();
 const lastGoodSvg = {};
@@ -17,12 +14,16 @@ async function ensurePack(name) {
     if (loadedPacks.has(name)) return;
     try {
         const loader = () => fetch(`/__live/iconify-json/${name}`).then(r => r.json());
-        await mermaid.registerIconPacks([{ name, loader }]);
+        await window.mermaid.registerIconPacks([{ name, loader }]);
         loadedPacks.add(name);
     } catch (_) { }
 }
 
 export async function renderMermaidBlock(block) {
+    if (!window.mermaid) {
+        throw new Error('mermaid failed to load from the CDN. Check your internet connection.');
+    }
+
     const source = decodeURIComponent(block.dataset.mermaidSource || '');
     if (!source.trim()) return;
 
@@ -35,7 +36,7 @@ export async function renderMermaidBlock(block) {
     try {
         mermaidIdCounter++;
         const id = 'mmd-render-' + mermaidIdCounter;
-        const { svg } = await mermaid.render(id, source);
+        const { svg } = await window.mermaid.render(id, source);
 
         wrap.innerHTML = svg;
         block.classList.add('mermaid-rendered');

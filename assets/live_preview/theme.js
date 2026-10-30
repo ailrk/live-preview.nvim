@@ -1,4 +1,3 @@
-import { mermaid } from "./mermaid.js";
 import { $ } from './global.js';
 
 // SVG paths for theme icons
@@ -20,8 +19,8 @@ export function applyTheme(theme) {
             ? 'https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github-dark.min.css'
             : 'https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github.min.css';
     }
-    if (mermaid) {
-        mermaid.initialize({
+    if (window.mermaid) {
+        window.mermaid.initialize({
             startOnLoad: false,
             theme: theme === 'dark' ? 'dark' : 'default',
             securityLevel: 'strict',

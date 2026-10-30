@@ -554,6 +554,7 @@ end
 
 local function cdn_map(p, ...)
     local params = {...}
+
     if #params == 0 then
         if "github-dark.min.css" == p then
             return "https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github-dark.min.css"
@@ -597,9 +598,10 @@ local function cdn_map(p, ...)
         if "markdown-it-github-alerts.mjs" == p then
             return "https://unpkg.com/markdown-it-github-alerts@1.0.1/dist/index.mjs"
         end
-        if "mermaid.esm.min.mjs" == p then
-            return "https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.esm.min.mjs"
+        if "mermaid.min.js" == p then
+            return "https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.min.js"
         end
+
     elseif #params == 1 then
         local p1 = params[1]
         if "iconify-json" == p then
