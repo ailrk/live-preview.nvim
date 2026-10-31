@@ -15,12 +15,16 @@ Markdown preview in the browser, updated as you type.
 - One server per Neovim instance on a free port
 
 ## Install
+
+With Lazy.nvim:
+
 ```lua
 {
   "ailrk/live-preview.nvim",
-  dependencies = { "you/live-server.nvim" },
   cmd = { "LivePreview", "LivePreviewStop" },
-  opts = {},
+  config = function ()
+    require("live_preview").setup{}
+  end
 }
 ```
 
