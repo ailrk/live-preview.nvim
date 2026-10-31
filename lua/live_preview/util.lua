@@ -51,13 +51,7 @@ function M.open_in_browser(url, browser)
 	if vim.fn.has("mac") == 1 then
 		candidates = { { "open", url } }
 	elseif vim.fn.has("wsl") == 1 then
-		-- WSL: Windows interop may be disabled or off PATH (issue #26), so
-		-- try the usual launchers in order instead of assuming one works.
-		candidates = {
-			{ "wslview", url },
-			{ "explorer.exe", url },
-			{ "powershell.exe", "-NoProfile", "-Command", "Start-Process '" .. url .. "'" },
-		}
+		candidates = { { "cmd.exe", "/c", "start", url } }
 	elseif vim.fn.has("unix") == 1 then
 		candidates = { { "xdg-open", url } }
 	elseif vim.fn.has("win32") == 1 then

@@ -714,8 +714,14 @@ function M.start()
 				vim.log.levels.ERROR
 			)
 			return
-		end
-		M._server_instance = inst
+        end
+
+        vim.notify(
+            ("Live Preview: runs on %s"):format(browser_url(inst.port)),
+            vim.log.levels.INFO
+        )
+
+        M._server_instance = inst
 
 		if type(M.config.hooks.on_start) == "function" then
 			M.config.hooks.on_start(browser_url(inst.port))
