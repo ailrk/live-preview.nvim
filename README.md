@@ -10,7 +10,7 @@ Markdown preview in the browser, updated as you type.
 - Mermaid diagrams
 - KaTeX
 - Relative images
-- YAML front matter panel
+- YAML frontmatter panel
 - Stand alone plugin, no extra dependencies
 - One server per Neovim instance on a free port
 
@@ -53,9 +53,16 @@ Defaults shown for the common ones:
   yaml_mode = "panel",       -- "panel" | "hide" | "raw"
   custom_css = "",           -- path to a CSS file
   extra_asset_roots = {},    -- extra dirs images may be served from
-  debounce_ms = 300,         -- debounce interval
+  debounce_ms = 100,         -- debounce interval
   bottom_padding = 0.5,      -- 0.5 = middle of viewport, 1.0 = bottom edge
 }
 ```
 
 See `lua/live_preview/init.lua` for the full list.
+
+## Offline
+
+You need Internet access the first time using this plugin so the frontend
+can load CDN packages for markdown. After the first run packages are cached by
+the server, stored at `~/.cache/nvim` (not in the browser). You can use it
+offline afterwards as long as you don't clear your cache.

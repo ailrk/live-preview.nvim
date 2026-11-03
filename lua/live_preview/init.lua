@@ -23,7 +23,7 @@ M.config = {
 
     refresh_events = { "InsertLeave", "TextChanged", "TextChangedI", "TextChangedP", "BufWritePost" },
 
-	debounce_ms = 300,
+	debounce_ms = 100,
 
     -- sync browser scroll + cursor to the nvim cursor
 	cursor_sync = true,
