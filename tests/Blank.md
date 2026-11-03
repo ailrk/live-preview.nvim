@@ -1,13 +1,15 @@
-Hello there!
+Hello! This is a nvim live preview plugin.
 
-This is a nvim markdown preview plugin. It renders markdown.
+You can use it to preview markdown files!
 
-The cursor position is synchronized into the browser, you can see where you are typing in real time.
+The cursor position is synchrnoized to the browser.
 
-More over, you can click the text from the browser, the nvim cursor will readjust itself as well!
+It is bidirectional.
 
-If you want to edit another file, simply do it the normal way.
+If you click on any text from the browser, the position will be updated in nvim as well!
 
-The browser tab will automatically open that file as well.
+If you want to edit another file, just open it normally like how you do it in nvim.
 
-That's about it! Thank you!
+The plugin will open that file in the browser as well!
+
+That's about it, thank you!
