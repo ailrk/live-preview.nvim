@@ -37,13 +37,6 @@ M.config = {
 
 	-- Fraction (0–1): 0.5 = middle of viewport, 1.0 = bottom edge
 	bottom_padding = 0.5,
-
-	hooks = {
-		-- fun(url: string)|nil — called after preview starts; receives the preview URL
-		on_start = nil,
-		-- fun()|nil — called after preview stops
-		on_stop = nil,
-	},
 }
 
 function M.setup(opts)
@@ -712,10 +705,6 @@ function M.start()
 
         M._server_instance = inst
 
-		if type(M.config.hooks.on_start) == "function" then
-			M.config.hooks.on_start(browser_url(inst.port))
-		end
-
 		if M.config.open_browser then
 			vim.defer_fn(function()
 				util.open_in_browser(browser_url(inst.port))
@@ -725,10 +714,6 @@ function M.start()
 		-- Server already running in this nvim: retarget to this buffer's workspace
 		pcall(ls_server.update_target, M._server_instance, { shared_dir, dir })
 		pcall(ls_server.reload, M._server_instance, content_name, tick)
-
-		if type(M.config.hooks.on_start) == "function" then
-			M.config.hooks.on_start(browser_url(M._server_instance.port))
-		end
 
 		-- No browser tab connected: reopen.
 		if M.config.open_browser and ls_server.connected_client_count(M._server_instance) == 0 then
@@ -773,9 +758,6 @@ function M.stop()
 	M._workspace_dir = nil
 	M._last_cursor = nil
 	M._token = nil
-	if type(M.config.hooks.on_stop) == "function" then
-		M.config.hooks.on_stop()
-	end
 end
 
 return M
