@@ -3,40 +3,62 @@ import g, { $ } from "./global.js";
 const sidebarOutlineEl = $("sidebarOutline");
 const outlineDotEl = $('outlineDot');
 
-export function setupOutlineToggle() {
-    // Load initial preference from localStorage if desired
-    let isOpen = localStorage.getItem('outline_open') === 'true';
+let isOpen = localStorage.getItem('outline_open') === 'true';
+let contentObserver = null;
 
-    function updateOutlineState() {
-        if (isOpen) {
-            sidebarOutlineEl.style.display = 'block';
-            document.body.classList.add('has-outline');
-            outlineDotEl.classList.add('open');
-            generateSidebarOutline();
-        } else {
-            sidebarOutlineEl.style.display = 'none';
-            document.body.classList.remove('has-outline');
-            outlineDotEl.classList.remove('open');
-        }
-        localStorage.setItem('outline_open', isOpen);
-    }
+export function setupOutlineToggle() {
+    if (!outlineDotEl || !sidebarOutlineEl) return;
 
     outlineDotEl.addEventListener('click', () => {
         isOpen = !isOpen;
         updateOutlineState();
     });
 
-    // Run once on load
     updateOutlineState();
+
+    // Start watching content changes immediately
+    initContentObserver();
 }
 
-function generateSidebarOutline() {
-    // Clear previous outline
+function updateOutlineState() {
+    if (isOpen) {
+        sidebarOutlineEl.style.display = 'block';
+        document.body.classList.add('has-outline');
+        outlineDotEl.classList.add('open');
+        refreshOutline();
+    } else {
+        sidebarOutlineEl.style.display = 'none';
+        document.body.classList.remove('has-outline');
+        outlineDotEl.classList.remove('open');
+    }
+    localStorage.setItem('outline_open', isOpen);
+}
+
+// Automatically watch #content for changes
+function initContentObserver() {
+    if (!g.contentEl) return;
+
+    contentObserver = new MutationObserver((mutations) => {
+        if (isOpen) {
+            refreshOutline();
+        }
+    });
+
+    contentObserver.observe(g.contentEl, {
+        childList: true,
+        subtree: true,
+        characterData: true
+    });
+}
+
+function refreshOutline() {
+    if (!isOpen || !sidebarOutlineEl || !g.contentEl) return;
+
     sidebarOutlineEl.innerHTML = '';
 
     const headers = g.contentEl.querySelectorAll('h1, h2, h3, h4, h5, h6');
     if (headers.length === 0) {
-        sidebarOutlineEl.innerHTML = '<p class="outline-empty">No outline available</p>';
+        sidebarOutlineEl.innerHTML = '<p class="outline-empty" style="padding: 1rem; color: var(--fg-muted);">No outline available</p>';
         return;
     }
 
@@ -55,9 +77,9 @@ function generateSidebarOutline() {
         link.href = `#${id}`;
         link.textContent = text;
 
+        // Smooth scroling
         link.addEventListener('click', (e) => {
             e.preventDefault();
-            // Push the url state
             header.scrollIntoView({ behavior: 'smooth' });
             history.pushState(null, null, `#${id}`);
         });
