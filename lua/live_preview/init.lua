@@ -8,6 +8,7 @@ local M = {}
 
 local content_name = "content.md"
 local index_name = "index.html"
+local refresh_events = { "InsertLeave", "TextChanged", "TextChangedI", "TextChangedP", "BufWritePost" }
 
 M.config = {
 	-- bind address; "0.0.0.0" for network access
@@ -16,8 +17,6 @@ M.config = {
 
 	-- Path to a custom CSS file.
 	custom_css = "",
-
-    refresh_events = { "InsertLeave", "TextChanged", "TextChangedI", "TextChangedP", "BufWritePost" },
 
 	debounce_ms = 100,
 
@@ -488,7 +487,7 @@ local function set_autocmds_for_buffer(bufnr)
 	end
 	M._augroup = vim.api.nvim_create_augroup("MarkdownPreviewAuto", { clear = true })
 
-    for _, ev in ipairs(M.config.refresh_events) do
+    for _, ev in ipairs(refresh_events) do
         vim.api.nvim_create_autocmd(ev, {
             group = M._augroup,
             buffer = bufnr,
