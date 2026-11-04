@@ -135,8 +135,10 @@ body {
     margin: 0.35rem 0;
 }
 
-.outline-item.level-3 { padding-left: 0.75rem; }
-.outline-item.level-4 { padding-left: 1.5rem; }
+.outline-item.level-2 { padding-left: 0.75rem; }
+.outline-item.level-3 { padding-left: 1.5rem; }
+.outline-item.level-4 { padding-left: 2.25rem; }
+.outline-item.level-5 { padding-left: 3rem; }
 
 .outline-item a {
     color: var(--fg-muted);
