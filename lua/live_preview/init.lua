@@ -8,6 +8,7 @@ local M = {}
 
 local content_name = "content.md"
 local index_name = "index.html"
+local refresh_events = { "InsertLeave", "TextChanged", "TextChangedI", "TextChangedP", "BufWritePost" }
 
 M.config = {
 	-- bind address; "0.0.0.0" for network access
@@ -17,12 +18,7 @@ M.config = {
 	-- Path to a custom CSS file.
 	custom_css = "",
 
-    refresh_events = { "InsertLeave", "TextChanged", "TextChangedI", "TextChangedP", "BufWritePost" },
-
 	debounce_ms = 100,
-
-    -- sync browser scroll + cursor to the nvim cursor
-	cursor_sync = true,
 
 	-- "dark" | "light"
 	default_theme = "light",
@@ -41,13 +37,6 @@ M.config = {
 
 	-- Fraction (0–1): 0.5 = middle of viewport, 1.0 = bottom edge
 	bottom_padding = 0.5,
-
-	hooks = {
-		-- fun(url: string)|nil — called after preview starts; receives the preview URL
-		on_start = nil,
-		-- fun()|nil — called after preview stops
-		on_stop = nil,
-	},
 }
 
 function M.setup(opts)
@@ -360,7 +349,6 @@ end
 ---@param force boolean|nil  send even if nothing changed (e.g. on start / browser hello)
 ---@param settled boolean|nil set by the deferred retry
 local function send_cursor_sync(bufnr, force, settled)
-	if not M.config.cursor_sync then return end
 	if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then return end
 	if vim.api.nvim_get_current_buf() ~= bufnr then return end
 
@@ -418,8 +406,6 @@ end
 -- Move the cursor in the previewed buffer to a position sent by the browser.
 ---@param msg table {line: number (0-based, content.md), col: number (0-based BYTE col)}
 local function goto_position(msg)
-	if not M.config.cursor_sync then return end
-
 	local bufnr = M._active_bufnr
 	if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then return end
 
@@ -488,7 +474,7 @@ local function set_autocmds_for_buffer(bufnr)
 	end
 	M._augroup = vim.api.nvim_create_augroup("MarkdownPreviewAuto", { clear = true })
 
-    for _, ev in ipairs(M.config.refresh_events) do
+    for _, ev in ipairs(refresh_events) do
         vim.api.nvim_create_autocmd(ev, {
             group = M._augroup,
             buffer = bufnr,
@@ -719,10 +705,6 @@ function M.start()
 
         M._server_instance = inst
 
-		if type(M.config.hooks.on_start) == "function" then
-			M.config.hooks.on_start(browser_url(inst.port))
-		end
-
 		if M.config.open_browser then
 			vim.defer_fn(function()
 				util.open_in_browser(browser_url(inst.port))
@@ -732,10 +714,6 @@ function M.start()
 		-- Server already running in this nvim: retarget to this buffer's workspace
 		pcall(ls_server.update_target, M._server_instance, { shared_dir, dir })
 		pcall(ls_server.reload, M._server_instance, content_name, tick)
-
-		if type(M.config.hooks.on_start) == "function" then
-			M.config.hooks.on_start(browser_url(M._server_instance.port))
-		end
 
 		-- No browser tab connected: reopen.
 		if M.config.open_browser and ls_server.connected_client_count(M._server_instance) == 0 then
@@ -780,9 +758,6 @@ function M.stop()
 	M._workspace_dir = nil
 	M._last_cursor = nil
 	M._token = nil
-	if type(M.config.hooks.on_stop) == "function" then
-		M.config.hooks.on_stop()
-	end
 end
 
 return M
