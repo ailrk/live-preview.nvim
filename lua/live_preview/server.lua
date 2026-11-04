@@ -187,7 +187,7 @@ end
 local function on_request(inst, sock)
     return function(err_read, chunk)
         ----------------------------------------
-        --- guarding
+        -- guarding
         ----------------------------------------
 
         if err_read then
@@ -210,34 +210,20 @@ local function on_request(inst, sock)
         -- token endpoint
         ----------------------------------------
 
-        -- Canonicalize the path once; auth matching, endpoint dispatch,
-        -- and file mapping all use this same string so an encoded or
-        -- slash-padded variant can't reach a protected file ungated.
         local path_only = normalize_path(req.path)
         local query     = req.path:match("%?(.*)$") or ""
 
-        -- Pull a query-string parameter by key. Anchored to either
-        -- the start of the query or just after an '&' so we don't
-        -- accidentally match a key as a substring of another (e.g.
-        -- 't' inside 'event').
+        -- Get query param
         local function qparam(key)
             return query:match("^" .. key .. "=([^&]*)")
             or query:match("&" .. key .. "=([^&]*)")
         end
 
-        -- Auth gate. When inst.token is set, the SSE stream, the event
-        -- injection endpoint, and any path in inst.protected_paths
-        -- require a matching ?t=<token>. Static assets (/index.html,
-        -- /style.css, /favicon.ico, etc.) are intentionally NOT gated
-        -- because the browser bootstraps from them before any JS runs
-        -- and cannot append query strings to <link>/<img> tags it
-        -- discovers itself. Protect the user content (caller passes
-        -- protected_paths) and the live-reload control plane.
+        -- Auth. Protects assets and the websocket. CDN is not protected.
         if inst.token then
             local function path_needs_auth(p)
-                if p == "/__live/ws" or p == "/__live/asset" then
-                    return true
-                end
+                if p == "/__live/ws"    then return true end
+                if p == "/__live/asset" then return true end
                 for _, pat in ipairs(inst.protected_paths) do
                     if p:find(pat) then return true end
                 end
@@ -396,13 +382,11 @@ local function on_request(inst, sock)
                     end
                     if candidate and uv.fs_stat(candidate) then
                         return serve_path(sock, candidate, req.path, inst.headers)
-                    else
-                        goto continue
+                    else goto continue
                     end
                 elseif st and st.type == "file" then
                     return serve_path(sock, mapped, req.path, inst.headers)
-                else
-                    goto continue
+                else goto continue
                 end
             end
             ::continue::
