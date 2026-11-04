@@ -2,7 +2,7 @@
 
 [demo](https://github.com/user-attachments/assets/c57f796a-6427-48d9-b1f7-0dfee58c7027)
 
-Markdown preview in the browser, updated as you type.
+Markdown preview in the browser, update as you type, follows your cursor.
 
 - Live reload
 - Bidirecitonal cursor sync
