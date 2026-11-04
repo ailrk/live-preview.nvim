@@ -108,8 +108,8 @@ header h1 {
     flex: 1;
 }
 
-/* Connection dot */
-.status-dot {
+/* dots */
+.status-dot, .theme-dot, .outline-dot {
     width: 7px;
     height: 7px;
     border-radius: 50%;
@@ -117,6 +117,10 @@ header h1 {
     opacity: .4;
     transition: all .3s;
     flex-shrink: 0;
+}
+
+.theme-dot, .outline-dot {
+    cursor: pointer;
 }
 
 .status-dot.connected {
@@ -130,20 +134,13 @@ header h1 {
     opacity: 1;
 }
 
+.outline-dot.open {
+    opacity: 1;
+}
+
 #status {
     font-size: .75rem;
     color: var(--fg-muted);
-}
-
-.theme-dot{
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--fg-muted);
-    cursor: pointer;
-    opacity: .4;
-    transition: all .3s;
-    flex-shrink: 0;
 }
 
 .btn {
