@@ -66,3 +66,13 @@ You need Internet access the first time using this plugin so the frontend
 can load CDN packages for markdown. After the first run packages are cached by
 the server, stored at `~/.cache/nvim` (not in the browser). You can use it
 offline afterwards as long as you don't clear your cache.
+
+
+## Alternatives
+
+You can find similar live preview plugins here:
+
+- [iamcco/markdown-preview.nvim](https://github.com/iamcco/markdown-preview.nvim)
+- [brianhuster/live-preview.nvim](https://github.com/brianhuster/live-preview.nvim)
+- [selimacerbas/mdkite.nvim](https://github.com/selimacerbas/mdkite.nvim)
+- [mhersson/mpls](https://github.com/mhersson/mpls)
