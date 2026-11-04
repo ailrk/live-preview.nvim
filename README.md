@@ -46,7 +46,6 @@ Defaults shown for the common ones:
 {
   host = "127.0.0.1",        -- "0.0.0.0" for network access
   open_browser = true,
-  browser = nil,             -- app name, or a command table
   default_theme = "light",   -- "light" | "dark"
   cursor_sync = true,        -- cursor sync, both directions
   allow_raw_html = true,     -- false for untrusted markdown
@@ -66,7 +65,6 @@ You need Internet access the first time using this plugin so the frontend
 can load CDN packages for markdown. After the first run packages are cached by
 the server, stored at `~/.cache/nvim` (not in the browser). You can use it
 offline afterwards as long as you don't clear your cache.
-
 
 ## Alternatives
 

@@ -14,10 +14,6 @@ M.config = {
 	host = "127.0.0.1",
 	open_browser = true,
 
-    -- nil = system default browser. String for app/binary name (e.g. "Firefox",
-    -- "google-chrome").
-	browser = nil,
-
 	-- Path to a custom CSS file.
 	custom_css = "",
 
@@ -729,7 +725,7 @@ function M.start()
 
 		if M.config.open_browser then
 			vim.defer_fn(function()
-				util.open_in_browser(browser_url(inst.port), M.config.browser)
+				util.open_in_browser(browser_url(inst.port))
 			end, 200)
 		end
 	else
@@ -744,7 +740,7 @@ function M.start()
 		-- No browser tab connected: reopen.
 		if M.config.open_browser and ls_server.connected_client_count(M._server_instance) == 0 then
 			vim.defer_fn(function()
-				util.open_in_browser(browser_url(M._server_instance.port), M.config.browser)
+				util.open_in_browser(browser_url(M._server_instance.port))
 			end, 200)
 		end
 	end

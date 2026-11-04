@@ -1,73 +1,6 @@
 -- lua/live_preview/util.lua
 local M = {}
 
--- Launch a detached command; true when the process spawned.
--- (vim.fn.jobstart raises for a non-executable command, so pcall it.)
-local function try_launch(cmd, opts)
-	local ok, job = pcall(vim.fn.jobstart, cmd, opts or { detach = true })
-	return ok and job > 0
-end
-
--- Open a URL in the browser.
----@param url string
----@param browser string|table|nil Optional override. String = browser name/binary.
----  Table = full command (URL appended). nil = system default.
-function M.open_in_browser(url, browser)
-	local function warn(what)
-		vim.notify(
-			("Markdown Preview: %s.\nOpen manually: %s"):format(what, url),
-			vim.log.levels.WARN
-		)
-	end
-
-	if browser then
-		local cmd
-		local opts = { detach = true }
-		if type(browser) == "table" then
-			cmd = vim.list_extend(vim.deepcopy(browser), { url })
-		elseif vim.fn.has("mac") == 1 then
-			-- On macOS, `open -a` resolves app names like "Firefox" or
-			-- "Google Chrome". The spawn succeeds even when the app doesn't
-			-- exist (`open` itself exits non-zero), so check the exit code.
-			cmd = { "open", "-a", browser, url }
-			opts.on_exit = function(_, code)
-				if code ~= 0 then
-					vim.schedule(function()
-						warn(('configured browser "%s" could not be opened'):format(browser))
-					end)
-				end
-			end
-		else
-			cmd = { browser, url }
-		end
-		if not try_launch(cmd, opts) then
-			warn(("could not launch configured browser (%s)")
-				:format(type(browser) == "table" and browser[1] or browser))
-		end
-		return
-	end
-
-	local candidates
-	if vim.fn.has("mac") == 1 then
-		candidates = { { "open", url } }
-	elseif vim.fn.has("wsl") == 1 then
-		candidates = { { "cmd.exe", "/c", "start", url } }
-	elseif vim.fn.has("unix") == 1 then
-		candidates = { { "xdg-open", url } }
-	elseif vim.fn.has("win32") == 1 then
-		candidates = { { "cmd.exe", "/c", "start", url } }
-	else
-		candidates = {}
-	end
-
-	for _, cmd in ipairs(candidates) do
-		if vim.fn.executable(cmd[1]) == 1 and try_launch(cmd) then
-			return
-		end
-	end
-	warn("could not open a browser automatically")
-end
-
 -- Generate a per-buffer workspace directory under Neovim's cache.
 ---@param bufnr integer
 ---@return string
@@ -89,5 +22,36 @@ M.shared_workspace = (function()
         return cached_path
     end
 end)()
+
+-- Launch a detached command; true when the process spawned.
+-- (vim.fn.jobstart raises for a non-executable command, so pcall it.)
+local function try_launch(cmd, opts)
+	local ok, job = pcall(vim.fn.jobstart, cmd, opts or { detach = true })
+	return ok and job > 0
+end
+
+-- Open a URL in the browser.
+---@param url string
+function M.open_in_browser(url)
+	local candidates
+	if vim.fn.has("mac") == 1 then
+		candidates = { { "open", url } }
+	elseif vim.fn.has("wsl") == 1 then
+		candidates = { { "cmd.exe", "/c", "start", url } }
+	elseif vim.fn.has("unix") == 1 then
+		candidates = { { "xdg-open", url } }
+	elseif vim.fn.has("win32") == 1 then
+		candidates = { { "cmd.exe", "/c", "start", url } }
+	else
+		candidates = {}
+	end
+
+	for _, cmd in ipairs(candidates) do
+		if vim.fn.executable(cmd[1]) == 1 and try_launch(cmd) then
+			return
+		end
+	end
+	vim.notify("Live Preview: could not open a browser automatically", vim.log.levels.WARN)
+end
 
 return M
