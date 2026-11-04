@@ -20,9 +20,6 @@ M.config = {
 
 	debounce_ms = 100,
 
-    -- sync browser scroll + cursor to the nvim cursor
-	cursor_sync = true,
-
 	-- "dark" | "light"
 	default_theme = "light",
 
@@ -359,7 +356,6 @@ end
 ---@param force boolean|nil  send even if nothing changed (e.g. on start / browser hello)
 ---@param settled boolean|nil set by the deferred retry
 local function send_cursor_sync(bufnr, force, settled)
-	if not M.config.cursor_sync then return end
 	if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then return end
 	if vim.api.nvim_get_current_buf() ~= bufnr then return end
 
@@ -417,8 +413,6 @@ end
 -- Move the cursor in the previewed buffer to a position sent by the browser.
 ---@param msg table {line: number (0-based, content.md), col: number (0-based BYTE col)}
 local function goto_position(msg)
-	if not M.config.cursor_sync then return end
-
 	local bufnr = M._active_bufnr
 	if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then return end
 

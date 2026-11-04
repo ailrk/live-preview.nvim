@@ -47,7 +47,6 @@ Defaults shown for the common ones:
   host = "127.0.0.1",        -- "0.0.0.0" for network access
   open_browser = true,
   default_theme = "light",   -- "light" | "dark"
-  cursor_sync = true,        -- cursor sync, both directions
   allow_raw_html = true,     -- false for untrusted markdown
   yaml_mode = "panel",       -- "panel" | "hide" | "raw"
   custom_css = "",           -- path to a CSS file
