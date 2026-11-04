@@ -1,6 +1,7 @@
 import { setupMarkdown} from "./markdown.js";
 import { setupOverlay } from "./overlay.js";
 import { setupTheme } from "./theme.js";
+import { setupOutlineToggle } from "./outline.js";
 import g, { showContent, applyBottomPadding } from "./global.js";
 import { sync, connectWS, setupScrollSync } from "./sync.js";
 
@@ -12,12 +13,12 @@ import { sync, connectWS, setupScrollSync } from "./sync.js";
         setupTheme();
         setupOverlay();
         setupMarkdown();
+        setupOutlineToggle();
 
         // Bottom padding
         window.addEventListener('resize', applyBottomPadding);
 
-        // On an image the cursor becomes an outline around it. Restyle #cursor.on-image
-        // in your custom_css if you want something else.
+        // On an image the cursor becomes an outline around it.
         document.head.appendChild(Object.assign(document.createElement('style'), {
             textContent:
                 `#cursor.on-image { background: transparent !important;

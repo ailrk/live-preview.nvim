@@ -20,11 +20,11 @@
 
 <body>
     <header>
+        <btn id="outlineDot" class="outline-dot" title="Toggle outline"></btn>
         <btn id="themeBtn" class="theme-dot" title="Toggle Light/dark"></btn>
         <div id="statusDot" class="status-dot" title="Disconnected"></div>
         <span id="status" aria-live="polite"></span>
     </header>
-
     <!-- Loading skeleton (replaced by content) -->
     <div id="loadingSkeleton" class="skeleton">
         <div class="skeleton-line"></div>
@@ -42,7 +42,13 @@
         <summary>Front matter</summary>
         <pre id="fm-content"></pre>
     </details>
-    <div id="content" style="display:none"></div>
+
+    <div class="main-layout" id="mainLayout">
+        <aside id="sidebarOutline" class="sidebar-outline" style="display: none;">
+            <div id="outline"></div>
+        </aside>
+        <div id="content" style="display:none"></div>
+    </div>
 
     <!-- Fullscreen overlay for diagram zoom/pan -->
     <div id="overlay">

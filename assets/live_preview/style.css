@@ -82,6 +82,83 @@ body {
     -webkit-font-smoothing: antialiased;
 }
 
+/* ── Outline ──────────────────────────────────────────────── */
+
+/* Layout container when outline is active */
+.main-layout {
+    display: flex;
+    max-width: 1250px;
+    margin: 0 auto;
+    padding: 0 1rem;
+    align-items: flex-start;
+}
+
+/* Sidebar styling with explicit fixed width and no shrinking */
+.sidebar-outline {
+    width: 260px;
+    min-width: 260px;
+    flex-shrink: 0;
+    position: sticky;
+    top: 1rem;
+    height: calc(100vh - 2rem);
+    overflow-y: auto;
+    font-size: 0.85rem;
+    border-right: 1px solid var(--stroke);
+    padding: 1rem 1rem 1rem 0;
+    margin-right: 2rem;
+}
+
+/* Content area takes remaining space nicely */
+.main-layout #content {
+    flex: 1;
+    min-width: 0;
+    max-width: 900px;
+    margin: 0;
+    padding: 2rem 0 4rem 0;
+}
+
+/* Default state when outline is closed (content centered normally) */
+#content {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 2rem 2rem 4rem;
+}
+
+/* Outline list links */
+.outline-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.outline-item {
+    margin: 0.35rem 0;
+}
+
+.outline-item.level-2 { padding-left: 0.75rem; }
+.outline-item.level-3 { padding-left: 1.5rem; }
+.outline-item.level-4 { padding-left: 2.25rem; }
+.outline-item.level-5 { padding-left: 3rem; }
+
+.outline-item a {
+    color: var(--fg-muted);
+    text-decoration: none;
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.outline-item a:hover {
+    color: var(--link);
+}
+
+@media (max-width: 768px) {
+    .sidebar-outline {
+        display: none !important;
+    }
+}
+
 /* ── Header ────────────────────────────────────────────────────── */
 header {
     top: 0;
@@ -90,6 +167,9 @@ header {
     align-items: center;
     gap: .6rem;
     padding: .55rem 1.2rem;
+    width: 100%;
+    background: var(--bg);
+    position: fixed;
 }
 
 header h1 {
@@ -108,8 +188,8 @@ header h1 {
     flex: 1;
 }
 
-/* Connection dot */
-.status-dot {
+/* dots */
+.status-dot, .theme-dot, .outline-dot {
     width: 7px;
     height: 7px;
     border-radius: 50%;
@@ -117,6 +197,10 @@ header h1 {
     opacity: .4;
     transition: all .3s;
     flex-shrink: 0;
+}
+
+.theme-dot, .outline-dot {
+    cursor: pointer;
 }
 
 .status-dot.connected {
@@ -130,20 +214,15 @@ header h1 {
     opacity: 1;
 }
 
+.outline-dot.open {
+    opacity: 0.7;
+}
+
 #status {
     font-size: .75rem;
     color: var(--fg-muted);
-}
-
-.theme-dot{
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--fg-muted);
-    cursor: pointer;
-    opacity: .4;
-    transition: all .3s;
-    flex-shrink: 0;
+    -webkit-user-select: none;
+    user-select: none;
 }
 
 .btn {
