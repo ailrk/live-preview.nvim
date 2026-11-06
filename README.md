@@ -1,6 +1,6 @@
 # live-preview.nvim
 
-[demo](https://github.com/user-attachments/assets/c57f796a-6427-48d9-b1f7-0dfee58c7027)
+[demo2](https://github.com/user-attachments/assets/c57f796a-6427-48d9-b1f7-0dfee58c7027)
 
 Markdown preview in the browser, update as you type, follows your cursor.
 
@@ -13,6 +13,10 @@ Markdown preview in the browser, update as you type, follows your cursor.
 - YAML frontmatter panel
 - Stand alone plugin, no extra dependencies
 - One server per Neovim instance on a free port
+
+![demo1](https://github.com/user-attachments/assets/2523fa84-f8d5-4fdd-bdbd-000c7d268c9a)
+
+![demo3](https://github.com/user-attachments/assets/a14512f1-44c2-4b3e-b540-519c5073ef76)
 
 ## Install
 
