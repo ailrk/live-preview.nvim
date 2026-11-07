@@ -4,16 +4,60 @@ local ws = require("live_preview.http.ws")
 local ls_server = require("live_preview.server")
 local ls_util = require("live_preview.http.util")
 local file = require("live_preview.file")
+
+local api = vim.api
+local uv = vim.uv or vim.loop
+local levels = vim.log.levels
+
 local M = {}
 
-local content_name = "content.md"
-local index_name = "index.html"
-local refresh_events = { "InsertLeave", "TextChanged", "TextChangedI", "TextChangedP", "BufWritePost" }
+---------------------------------------------------------------------------
+-- Constants
+---------------------------------------------------------------------------
+
+local CONTENT_NAME = "content.md"
+local INDEX_NAME = "index.html"
+local ASSET_ROOT_NAME = "asset_root"
+local ASSET_DIR = "assets/live_preview/"
+
+local REFRESH_EVENTS = { "InsertLeave", "TextChanged", "TextChangedI", "TextChangedP", "BufWritePost" }
+local CURSOR_EVENTS = { "CursorMoved", "CursorMovedI", "TextChangedP" }
+
+-- Line offset between the nvim buffer and content.md, per buffer kind.
+--   markdown: 0
+--   mermaid file (.mmd/.mermaid): content.md gets a "```mermaid" line prepended
+--   other: content.md holds only an extracted block, so there is no mapping (nil)
+local LINE_OFFSET = { markdown = 0, mermaid = 1 }
+
+local CDN = {
+	["github-dark.min.css"] = "https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github-dark.min.css",
+	["github.min.css"] = "https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github.min.css",
+	["katex.min.css"] = "https://cdn.jsdelivr.net/npm/katex@0.16.28/dist/katex.min.css",
+	["texmath.css"] = "https://cdn.jsdelivr.net/npm/markdown-it-texmath@1.0.0/css/texmath.css",
+	["markdown-it.min.js"] = "https://cdn.jsdelivr.net/npm/markdown-it@14/dist/markdown-it.min.js",
+	["morphdom-umd.min.js"] = "https://cdn.jsdelivr.net/npm/morphdom@2/dist/morphdom-umd.min.js",
+	["highlight.min.js"] = "https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/highlight.min.js",
+	["markdown-it-emoji.min.js"] = "https://cdn.jsdelivr.net/npm/markdown-it-emoji@3.0.0/dist/markdown-it-emoji.min.js",
+	["markdown-it-footnote.min.js"] = "https://cdn.jsdelivr.net/npm/markdown-it-footnote@4.0.0/dist/markdown-it-footnote.min.js",
+	["markdown-it-task-lists.min.js"] = "https://cdn.jsdelivr.net/npm/markdown-it-task-lists@2.1.1/dist/markdown-it-task-lists.min.js",
+	["katex.min.js"] = "https://cdn.jsdelivr.net/npm/katex@0.16.28/dist/katex.min.js",
+	["markdownItAnchor.umd.js"] = "https://unpkg.com/markdown-it-anchor@9.2.0/dist/markdownItAnchor.umd.js",
+	["texmath.js"] = "https://cdn.jsdelivr.net/npm/markdown-it-texmath@1.0.0/texmath.js",
+	["markdown-it-github-alerts.mjs"] = "https://unpkg.com/markdown-it-github-alerts@1.0.1/dist/index.mjs",
+	["mermaid.min.js"] = "https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.min.js",
+}
+
+---------------------------------------------------------------------------
+-- Config
+---------------------------------------------------------------------------
 
 M.config = {
 	-- bind address; "0.0.0.0" for network access
 	host = "127.0.0.1",
 	open_browser = true,
+
+	-- Notify when :refresh finds nothing to update.
+	notify_on_refresh = false,
 
 	-- Path to a custom CSS file.
 	custom_css = "",
@@ -26,16 +70,16 @@ M.config = {
 	-- Extra asset roots (symlink targets / directories images may be served from).
 	extra_asset_roots = {},
 
-    -- Render raw HTML embedded in markdown.
+	-- Render raw HTML embedded in markdown.
 	allow_raw_html = true,
 
-	-- YAML front matter (jekyell style --- ... --- at the top of the file):
+	-- YAML front matter (jekyll style --- ... --- at the top of the file):
 	-- "panel" = strip it from the preview, show in a collapsible panel above
 	-- "hide"  = strip it entirely
 	-- "raw"   = leave it in the document (renders as markdown)
 	yaml_mode = "panel",
 
-	-- Fraction (0–1): 0.5 = middle of viewport, 1.0 = bottom edge
+	-- Fraction (0-1): 0.5 = middle of viewport, 1.0 = bottom edge
 	bottom_padding = 0.5,
 }
 
@@ -44,23 +88,83 @@ function M.setup(opts)
 	M.config.bottom_padding = math.max(0, math.min(1, M.config.bottom_padding))
 end
 
--- Internal state
+---------------------------------------------------------------------------
+-- State
+---------------------------------------------------------------------------
+
 M._augroup = nil
+M._follow_augroup = nil
 M._active_bufnr = nil
 M._last_text_by_buf = {}
-M._server_instance = nil
 M._written_tick = {}
+M._server_instance = nil
 M._refresh_timer = nil
 M._refresh_bufnr = nil
 M._workspace_dir = nil
-M._token = nil          -- live-server auth token (one per server lifetime)
-M._follow_augroup = nil
+M._token = nil -- live-server auth token (one per server lifetime)
 
 ---@type {line:integer, col:integer, mode:string, text:string}|nil
 M._last_cursor = nil
 
 ---------------------------------------------------------------------------
--- Workspace
+-- Small helpers
+---------------------------------------------------------------------------
+
+local function notify(msg, level)
+	vim.notify("Live Preview: " .. msg, level or levels.INFO)
+end
+
+local function is_number(x)
+	return type(x) == "number" and x == x -- rejects NaN
+end
+
+local function clamp(value, lo, hi)
+	return math.max(lo, math.min(hi, value))
+end
+
+local function buf_lines(bufnr)
+	return api.nvim_buf_get_lines(bufnr, 0, -1, false)
+end
+
+local function mermaid_fence(body)
+	return "```mermaid\n" .. body .. "\n```\n"
+end
+
+local function del_augroup(field)
+	if M[field] then
+		pcall(api.nvim_del_augroup_by_id, M[field])
+		M[field] = nil
+	end
+end
+
+--- Broadcast a message to all browsers. A missing server counts as success.
+---@return boolean ok, any err
+local function broadcast(msg)
+	if not M._server_instance then
+		return true
+	end
+	return pcall(ws.broadcast, M._server_instance, msg)
+end
+
+---@return "markdown"|"mermaid"|"other"
+local function buf_kind(bufnr)
+	if vim.bo[bufnr].filetype == "markdown" then
+		return "markdown"
+	end
+	local name = api.nvim_buf_get_name(bufnr)
+	if name:match("%.mmd$") or name:match("%.mermaid$") then
+		return "mermaid"
+	end
+	return "other"
+end
+
+---@return integer|nil
+local function content_line_offset(bufnr)
+	return LINE_OFFSET[buf_kind(bufnr)]
+end
+
+---------------------------------------------------------------------------
+-- Workspace & static assets
 ---------------------------------------------------------------------------
 
 local function ensure_workspace(bufnr)
@@ -69,154 +173,173 @@ local function ensure_workspace(bufnr)
 	return dir
 end
 
----------------------------------------------------------------------------
--- Index HTML
----------------------------------------------------------------------------
+local function require_asset(name)
+	local path = file.resolve_asset(ASSET_DIR .. name)
+	if not path then
+		error(("Could not locate %s%s in runtimepath. Make sure the plugin ships it."):format(ASSET_DIR, name))
+	end
+	return path
+end
+
+--- Replace placeholders in order. Replacement values are computed lazily and
+--- inserted literally (no gsub % escapes).
+---@param content string
+---@param replacements {[1]:string, [2]:fun():string}[]
+local function fill_placeholders(content, replacements)
+	for _, r in ipairs(replacements) do
+		content = content:gsub(r[1], function()
+			return r[2]()
+		end)
+	end
+	return content
+end
+
+local function inject_custom_css(content)
+	local css_path = M.config.custom_css
+	if not css_path or css_path == "" then
+		return content
+	end
+
+	local src = vim.fn.expand(css_path)
+	local ok, css = pcall(file.read_text, src)
+	if not (ok and css) then
+		notify("custom_css not readable: " .. src, levels.WARN)
+		return content
+	end
+
+	return (content:gsub("</head>", function()
+		return "<style>\n" .. css .. "\n</style>\n</head>"
+	end, 1))
+end
 
 local function write_index(dir)
-	local dst = vim.fs.joinpath(dir, index_name)
-	local src = file.resolve_asset("assets/live_preview/index.html")
-	if not src then
-		error("Could not locate assets/live_preview/index.html in runtimepath. Make sure the plugin ships it.")
-	end
-	local content = file.read_text(src)
+	local content = file.read_text(require_asset("index.html"))
+	local style_path = require_asset("style.css")
 
-	local style_css = file.resolve_asset("assets/live_preview/style.css")
-	if not style_css then
-		error("Could not locate assets/live_preview/style.css")
-	end
+	content = fill_placeholders(content, {
+		{ "__BOTTOM_PADDING__", function() return tostring(M.config.bottom_padding) end },
+		{ "__STYLE_CSS__", function() return file.read_text(style_path) end },
+		{ "__THEME__", function() return M.config.default_theme end },
+		{ "__ALLOW_HTML__", function() return M.config.allow_raw_html ~= false and "true" or "false" end },
+		{
+			"__YAML_MODE__",
+			function()
+				local m = M.config.yaml_mode
+				return (m == "hide" or m == "raw") and m or "panel"
+			end,
+		},
+	})
+	content = inject_custom_css(content)
 
-	content = content:gsub("__BOTTOM_PADDING__", function() return tostring(M.config.bottom_padding) end)
-	content = content:gsub("__STYLE_CSS__", function() return file.read_text(style_css) end)
-	content = content:gsub("__THEME__", function() return M.config.default_theme end)
-	content = content:gsub("__ALLOW_HTML__", function() return M.config.allow_raw_html ~= false and "true" or "false" end)
-	content = content:gsub("__YAML_MODE__", function()
-		local m = M.config.yaml_mode
-		if m ~= "hide" and m ~= "raw" then m = "panel" end
-		return m
-	end)
-
-	-- Inline custom CSS after the bundled styles so user rules win the cascade.
-	if M.config.custom_css and M.config.custom_css ~= "" then
-		local css_src = vim.fn.expand(M.config.custom_css)
-		local ok, css = pcall(file.read_text, css_src)
-		if ok and css then
-			content = content:gsub("</head>", function()
-				return "<style>\n" .. css .. "\n</style>\n</head>"
-			end, 1)
-		else
-			vim.notify("Live Preview: custom_css not readable: " .. css_src, vim.log.levels.WARN)
-		end
-	end
-
+	local dst = vim.fs.joinpath(dir, INDEX_NAME)
 	file.write_text(dst, content)
 	return dst
 end
 
 local function write_js(dir)
-    local assets_dir = file.resolve_asset("assets/live_preview/")
-    if not assets_dir then
-        vim.notify("Live Preview: Could not locate assets directory", vim.log.levels.WARN)
-        return
-    end
+	local assets_dir = file.resolve_asset(ASSET_DIR)
+	if not assets_dir then
+		notify("Could not locate assets directory", levels.WARN)
+		return
+	end
 
-    local ok, err = pcall(function()
-        for name, ft in vim.fs.dir(assets_dir) do
-            if ft == "file" and name:match("%.js$") then
-                local src = file.resolve_asset("assets/live_preview/" .. name)
-                local dst = vim.fs.joinpath(dir, name)
-                if src then
-                    local content = file.read_text(src)
-                    file.write_text(dst, content)
-                end
-            end
-        end
-    end)
+	local ok, err = pcall(function()
+		for name, ft in vim.fs.dir(assets_dir) do
+			if ft == "file" and name:match("%.js$") then
+				local src = file.resolve_asset(ASSET_DIR .. name)
+				if src then
+					file.write_text(vim.fs.joinpath(dir, name), file.read_text(src))
+				end
+			end
+		end
+	end)
 
-    if not ok then
-        vim.notify("Live Preview: Failed to write JavaScript assets: " .. tostring(err), vim.log.levels.ERROR)
-    end
+	if not ok then
+		notify("Failed to write JavaScript assets: " .. tostring(err), levels.ERROR)
+	end
 end
 
 ---------------------------------------------------------------------------
 -- Mermaid extraction
 ---------------------------------------------------------------------------
 
--- Extracts the mermaid fenced code block covering the cursor using Tree-sitter.
----@param bufnr integer
----@return string|nil
-local function extract_under_cursor(bufnr)
-    local function get_node_text(node)
-        return vim.treesitter.get_node_text(node, bufnr)
-    end
+-- Newer Neovim returns lists of nodes per capture from iter_matches(); older
+-- versions return a single node. Accept both.
+local function first_node(n)
+	if type(n) == "table" then
+		return n[1]
+	end
+	return n
+end
 
+--- Extract the mermaid fenced code block covering the cursor using Tree-sitter.
+---@param bufnr integer
+---@return string
+local function extract_under_cursor(bufnr)
 	local ok, parser = pcall(vim.treesitter.get_parser, bufnr, "markdown")
 	if not ok then
 		error("No Tree-sitter parser for markdown")
 	end
-	local tree = parser:parse()[1]
-	local root = tree:root()
+	local root = parser:parse()[1]:root()
 
 	local query = vim.treesitter.query.parse(
 		"markdown",
 		[[
-    (fenced_code_block
-      (info_string) @info
-      (code_fence_content) @content)
-  ]])
+		(fenced_code_block
+		  (info_string) @info
+		  (code_fence_content) @content)
+		]]
+	)
 
-	local cursor = vim.api.nvim_win_get_cursor(0)
-	local cur_row = cursor[1] - 1
+	local cur_row = api.nvim_win_get_cursor(0)[1] - 1
 
-	for _, nodes, _ in query:iter_matches(root, bufnr, 0, -1) do
-		-- nodes[1] = info, nodes[2] = content (thanks to query order)
-		local info = nodes[1]
-		local content = nodes[2]
-		local block = info:parent()
-		local srow, _, erow, _ = block:range()
+	for _, nodes in query:iter_matches(root, bufnr, 0, -1) do
+		-- capture order follows the query: 1 = info, 2 = content
+		local info, content = first_node(nodes[1]), first_node(nodes[2])
+		local srow, _, erow = info:parent():range()
 		if cur_row >= srow and cur_row <= erow then
-			local info_txt = get_node_text(info):lower()
+			local info_txt = vim.treesitter.get_node_text(info, bufnr):lower()
 			if info_txt:match("mermaid") then
-				return get_node_text(content)
+				return vim.treesitter.get_node_text(content, bufnr)
 			end
 		end
 	end
 	error("Cursor is not inside a mermaid fenced code block")
 end
 
--- Fallback: simple regex scan for the nearest mermaid block above the cursor
+--- Fallback: plain-text scan for the nearest mermaid block above the cursor.
+---@return string|nil
 local function fallback_scan(bufnr)
-	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-	local row = vim.api.nvim_win_get_cursor(0)[1]
-	local i = row
-	-- search upwards for ```mermaid
-	while i >= 1 do
-		if lines[i]:match("^%s*```%s*mermaid") then
+	local lines = buf_lines(bufnr)
+
+	local start
+	for i = api.nvim_win_get_cursor(0)[1], 1, -1 do
+		if lines[i] and lines[i]:match("^%s*```%s*mermaid") then
+			start = i
 			break
 		end
-		i = i - 1
 	end
-	if i < 1 then
+	if not start then
 		return nil
 	end
-	i = i + 1
+
 	local acc = {}
-	while i <= #lines and not lines[i]:match("^%s*```%s*$") do
-		table.insert(acc, lines[i])
-		i = i + 1
+	for i = start + 1, #lines do
+		if lines[i]:match("^%s*```%s*$") then
+			break
+		end
+		acc[#acc + 1] = lines[i]
 	end
 	return table.concat(acc, "\n")
 end
 
+---@return string
 local function extract_mermaid_under_cursor(bufnr)
 	local ok, text = pcall(extract_under_cursor, bufnr)
-	if not (ok and text and #text > 0) then
-		text = nil
-	end
-
-	if text and #text > 0 then
+	if ok and text and #text > 0 then
 		return text
 	end
+
 	local fallback = fallback_scan(bufnr)
 	if not fallback or #fallback == 0 then
 		error("No ```mermaid fenced code block found under (or above) the cursor")
@@ -225,36 +348,23 @@ local function extract_mermaid_under_cursor(bufnr)
 end
 
 ---------------------------------------------------------------------------
--- Content writing (unified: markdown or mermaid)
+-- Content (markdown or mermaid, unified)
 ---------------------------------------------------------------------------
 
--- Get the content to write based on filetype.
--- Markdown buffers: entire buffer.
--- Mermaid files (.mmd, .mermaid): entire buffer wrapped in mermaid fence.
--- Others: mermaid block under cursor wrapped in fence.
 ---@param bufnr integer
 ---@return string
 local function get_content(bufnr)
-	local text
-	local ft = vim.bo[bufnr].filetype
-	if ft == "markdown" then
-		local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-		text = table.concat(lines, "\n")
-	elseif vim.api.nvim_buf_get_name(bufnr):match("%.mmd$")
-		or vim.api.nvim_buf_get_name(bufnr):match("%.mermaid$") then
-		-- .mmd / .mermaid files: treat entire buffer as mermaid
-		local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-		text = "```mermaid\n" .. table.concat(lines, "\n") .. "\n```\n"
-	else
-		-- Other filetypes: extract mermaid block under cursor, wrap in code fence
-		local mermaid_text = extract_mermaid_under_cursor(bufnr)
-		text = "```mermaid\n" .. mermaid_text .. "\n```\n"
+	local kind = buf_kind(bufnr)
+	if kind == "markdown" then
+		return table.concat(buf_lines(bufnr), "\n")
+	elseif kind == "mermaid" then
+		return mermaid_fence(table.concat(buf_lines(bufnr), "\n"))
 	end
-
-	return text
+	-- Other filetypes: extract the mermaid block under the cursor.
+	return mermaid_fence(extract_mermaid_under_cursor(bufnr))
 end
 
--- Same as get_content but never errors (returns nil on failure).
+--- get_content, but returns nil on failure or empty content.
 ---@param bufnr integer
 ---@return string|nil
 local function get_content_safe(bufnr)
@@ -266,30 +376,29 @@ local function get_content_safe(bufnr)
 end
 
 local function write_content(dir, text, bufnr)
-	local path = vim.fs.joinpath(dir, content_name)
+	local path = vim.fs.joinpath(dir, CONTENT_NAME)
 	file.write_text(path, text)
-	-- Sidecar recording the source file's directory. The server's asset
-	-- route resolves relative image paths against it, and re-reads it per
-	-- request so buffer switches retarget it.
+
 	if bufnr then
-		local name = vim.api.nvim_buf_get_name(bufnr)
+		local name = api.nvim_buf_get_name(bufnr)
 		local src_dir = name ~= "" and vim.fs.dirname(name) or nil
 		if src_dir and src_dir ~= "" then
-			pcall(file.write_text, vim.fs.joinpath(dir, "asset_root"), src_dir)
+			pcall(file.write_text, vim.fs.joinpath(dir, ASSET_ROOT_NAME), src_dir)
 		end
 	end
 	return path
 end
 
 ---------------------------------------------------------------------------
--- Refresh logic
+-- Refresh (nvim -> browser content)
 ---------------------------------------------------------------------------
 
+---@return boolean changed
 local function maybe_refresh(bufnr)
-	bufnr = bufnr or vim.api.nvim_get_current_buf()
+	bufnr = bufnr or api.nvim_get_current_buf()
 
 	-- Read the tick before the text: the content we write is at least this new.
-	local tick = vim.api.nvim_buf_get_changedtick(bufnr)
+	local tick = api.nvim_buf_get_changedtick(bufnr)
 	local text = get_content_safe(bufnr)
 	if not text then
 		return false
@@ -299,9 +408,7 @@ local function maybe_refresh(bufnr)
 		-- The edit didn't change what the preview shows. Tell the browser, so a
 		-- cursor message held back for this tick is released.
 		M._written_tick[bufnr] = tick
-		if M._server_instance then
-			pcall(ws.broadcast, M._server_instance, { type = "tick", tick = tick })
-		end
+		broadcast({ type = "tick", tick = tick })
 		return false
 	end
 
@@ -311,91 +418,94 @@ local function maybe_refresh(bufnr)
 	M._written_tick[bufnr] = tick
 
 	if M._server_instance then
-		pcall(ls_server.reload, M._server_instance, content_name, tick)
+		pcall(ls_server.reload, M._server_instance, CONTENT_NAME, tick)
 	end
-
 	return true
 end
 
 local function debounced_refresh(bufnr)
 	M._refresh_bufnr = bufnr -- the timer refreshes whichever buffer asked last
 	if not M._refresh_timer then
-		M._refresh_timer = vim.loop.new_timer()
+		M._refresh_timer = uv.new_timer()
 	end
-	if M._refresh_timer:is_active() then return end
-	M._refresh_timer:start(M.config.debounce_ms, 0, vim.schedule_wrap(function()
-		local b = M._refresh_bufnr
-		-- Buffer switched meanwhile: start() already wrote the new buffer.
-		if b ~= M._active_bufnr then return end
-		pcall(maybe_refresh, b)
-	end))
+	if M._refresh_timer:is_active() then
+		return
+	end
+
+	M._refresh_timer:start(
+		M.config.debounce_ms,
+		0,
+		vim.schedule_wrap(function()
+			local b = M._refresh_bufnr
+			-- Buffer switched meanwhile: start() already wrote the new buffer.
+			if b ~= M._active_bufnr then
+				return
+			end
+			pcall(maybe_refresh, b)
+		end)
+	)
 end
 
 ---------------------------------------------------------------------------
 -- Cursor sync (nvim -> browser)
 ---------------------------------------------------------------------------
 
--- Line offset between the nvim buffer and content.md.
--- markdown: 0. .mmd/.mermaid: content.md gets a "```mermaid" line prepended.
--- anything else: content.md holds only an extracted block, so no mapping.
-local function content_line_offset(bufnr)
-	if vim.bo[bufnr].filetype == "markdown" then return 0 end
-	local name = vim.api.nvim_buf_get_name(bufnr)
-	if name:match("%.mmd$") or name:match("%.mermaid$") then return 1 end
-	return nil
+local function same_cursor(a, b)
+	return a ~= nil and a.line == b.line and a.col == b.col and a.mode == b.mode and a.text == b.text
 end
 
 ---@param bufnr integer
 ---@param force boolean|nil  send even if nothing changed (e.g. on start / browser hello)
 ---@param settled boolean|nil set by the deferred retry
 local function send_cursor_sync(bufnr, force, settled)
-	if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then return end
-	if vim.api.nvim_get_current_buf() ~= bufnr then return end
+	if not bufnr or not api.nvim_buf_is_valid(bufnr) then
+		return
+	end
+	if api.nvim_get_current_buf() ~= bufnr then
+		return
+	end
 
-    local tick = vim.api.nvim_buf_get_changedtick(bufnr)
 	local offset = content_line_offset(bufnr)
-	if not offset then return end
+	if not offset then
+		return
+	end
 
-	local pos = vim.api.nvim_win_get_cursor(0)
-	local mode = vim.api.nvim_get_mode().mode
+	local tick = api.nvim_buf_get_changedtick(bufnr)
+	local mode = api.nvim_get_mode().mode
 
 	-- Insert completion (modes "ic" / "ix") passes through transient states:
 	-- nvim deletes the typed text, then re-inserts the match, and fires
 	-- CursorMovedI in between. Re-read the state once the loop has settled.
 	if not settled and (mode == "ic" or mode == "ix") then
-		vim.schedule(function() send_cursor_sync(bufnr, force, true) end)
+		vim.schedule(function()
+			send_cursor_sync(bufnr, force, true)
+		end)
 		return
 	end
 
-	local text = vim.api.nvim_get_current_line()
+	local pos = api.nvim_win_get_cursor(0)
+	local text = api.nvim_get_current_line()
+	local cursor = { line = pos[1], col = pos[2], mode = mode, text = text }
 
-	local last = M._last_cursor
-	if not force and last
-		and last.line == pos[1] and last.col == pos[2]
-		and last.mode == mode and last.text == text then
+	if not force and same_cursor(M._last_cursor, cursor) then
 		return
 	end
-	M._last_cursor = { line = pos[1], col = pos[2], mode = mode, text = text }
+	M._last_cursor = cursor
 
-	if M._server_instance then
-		local ok, err = pcall(ws.broadcast, M._server_instance, {
-			type = "cursor",
-            -- 0-based line in content.md
-			line = pos[1] - 1 + offset,
-            -- 0-based BYTE column; JS converts to UTF-16
-			col = pos[2],
-			mode = mode,
-            -- current line, so the cursor is right before the debounced reload
-			text = text,
-            tick = tick,
-            -- false while this edit's content hasn't been pushed yet: the
-            -- browser holds the cursor until that content has rendered
-            fresh = M._written_tick[bufnr] == tick,
-			total = vim.api.nvim_buf_line_count(bufnr) + offset,
-		})
-		if not ok then
-			vim.notify("Live Preview: cursor broadcast failed: " .. tostring(err), vim.log.levels.ERROR)
-		end
+	local ok, err = broadcast({
+		type = "cursor",
+		line = pos[1] - 1 + offset, -- 0-based line in content.md
+		col = pos[2], -- 0-based BYTE column; JS converts to UTF-16
+		mode = mode,
+		text = text, -- current line, so the cursor is right before the debounced reload
+		tick = tick,
+		-- false while this edit's content hasn't been pushed yet: the browser
+		-- holds the cursor until that content has rendered
+		fresh = M._written_tick[bufnr] == tick,
+		total = api.nvim_buf_line_count(bufnr) + offset,
+	})
+	if not ok then
+		notify("cursor broadcast failed: " .. tostring(err), levels.ERROR)
 	end
 end
 
@@ -403,58 +513,65 @@ end
 -- Cursor sync (browser -> nvim)
 ---------------------------------------------------------------------------
 
--- Move the cursor in the previewed buffer to a position sent by the browser.
+--- Move the cursor in the previewed buffer to a position sent by the browser.
 ---@param msg table {line: number (0-based, content.md), col: number (0-based BYTE col)}
 local function goto_position(msg)
 	local bufnr = M._active_bufnr
-	if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then return end
+	if not bufnr or not api.nvim_buf_is_valid(bufnr) then
+		return
+	end
 
-	-- Same mapping as nvim -> browser sync (nil = extracted mermaid block, no mapping)
+	-- Same mapping as nvim -> browser sync (nil = extracted mermaid block).
 	local offset = content_line_offset(bufnr)
-	if not offset then return end
+	if not offset then
+		return
+	end
 
-	-- The message comes from the browser, validate before proceeding.
-	if type(msg.line) ~= "number" or msg.line ~= msg.line then return end
+	-- The message comes from the browser: validate before using it.
+	if not is_number(msg.line) then
+		return
+	end
 
 	-- Only move the cursor if the buffer is visible somewhere.
 	local win = vim.fn.bufwinid(bufnr)
-	if win == -1 then return end
+	if win == -1 then
+		return
+	end
 
-	local count = vim.api.nvim_buf_line_count(bufnr)
-	local lnum = math.max(1, math.min(count, math.floor(msg.line) - offset + 1))
-	local text = vim.api.nvim_buf_get_lines(bufnr, lnum - 1, lnum, false)[1] or ""
+	local lnum = clamp(math.floor(msg.line) - offset + 1, 1, api.nvim_buf_line_count(bufnr))
+	local text = api.nvim_buf_get_lines(bufnr, lnum - 1, lnum, false)[1] or ""
 
-	local col = type(msg.col) == "number" and msg.col == msg.col and math.floor(msg.col) or 0
-	col = math.max(0, math.min(math.max(#text - 1, 0), col))
+	local col = is_number(msg.col) and math.floor(msg.col) or 0
+	col = clamp(col, 0, math.max(#text - 1, 0))
 
 	-- Snap to the start of a multibyte character.
 	if col > 0 and vim.str_utf_start then
 		local ok, back = pcall(vim.str_utf_start, text, col + 1)
-		if ok and type(back) == "number" then col = col + back end
+		if ok and type(back) == "number" then
+			col = col + back
+		end
 	end
 
-	if not pcall(vim.api.nvim_win_set_cursor, win, { lnum, col }) then return end
+	if not pcall(api.nvim_win_set_cursor, win, { lnum, col }) then
+		return
+	end
 
 	-- Pre-seed the dedupe state used by send_cursor_sync, so the CursorMoved
 	-- event this triggers is not echoed back to the browser (which would
 	-- scroll the page under the user's mouse).
-	M._last_cursor = {
-		line = lnum,
-		col = col,
-		mode = vim.api.nvim_get_mode().mode,
-		text = text,
-	}
+	M._last_cursor = { line = lnum, col = col, mode = api.nvim_get_mode().mode, text = text }
 
 	-- nvim may not be the focused window; make sure the move is drawn.
 	pcall(vim.cmd, "redraw")
 end
 
--- Handle messages sent by the browser over the websocket. Runs in a libuv
--- callback.
+--- Handle messages sent by the browser over the websocket (libuv callback).
 local function on_browser_message(raw)
 	vim.schedule(function()
 		local ok, msg = pcall(vim.json.decode, raw)
-		if not ok or type(msg) ~= "table" then return end
+		if not ok or type(msg) ~= "table" then
+			return
+		end
 
 		if msg.type == "hello" then
 			send_cursor_sync(M._active_bufnr, true)
@@ -469,59 +586,56 @@ end
 ---------------------------------------------------------------------------
 
 local function set_autocmds_for_buffer(bufnr)
-	if M._augroup then
-		pcall(vim.api.nvim_del_augroup_by_id, M._augroup)
-	end
-	M._augroup = vim.api.nvim_create_augroup("MarkdownPreviewAuto", { clear = true })
+	del_augroup("_augroup")
+	M._augroup = api.nvim_create_augroup("MarkdownPreviewAuto", { clear = true })
 
-    for _, ev in ipairs(refresh_events) do
-        vim.api.nvim_create_autocmd(ev, {
-            group = M._augroup,
-            buffer = bufnr,
-            callback = function()
-                debounced_refresh(bufnr)
-            end,
-            desc = "Live Preview auto-refresh (debounced)",
-        })
-    end
+	api.nvim_create_autocmd(REFRESH_EVENTS, {
+		group = M._augroup,
+		buffer = bufnr,
+		callback = function()
+			debounced_refresh(bufnr)
+		end,
+		desc = "Live Preview auto-refresh (debounced)",
+	})
 
-	for _, ev in ipairs({ "CursorMoved", "CursorMovedI", "TextChangedP" }) do
-		vim.api.nvim_create_autocmd(ev, {
-			group = M._augroup,
-			buffer = bufnr,
-			callback = function() send_cursor_sync(bufnr) end,
-			desc = "Live Preview cursor sync",
-		})
-	end
+	api.nvim_create_autocmd(CURSOR_EVENTS, {
+		group = M._augroup,
+		buffer = bufnr,
+		callback = function()
+			send_cursor_sync(bufnr)
+		end,
+		desc = "Live Preview cursor sync",
+	})
 
 	-- Not buffer-local on purpose: ModeChanged's pattern is matched against
-    -- "old:new" modes, so buffer-local registration is unreliable. The
-    -- callback checks the buffer itself.
-	vim.api.nvim_create_autocmd("ModeChanged", {
+	-- "old:new" modes, so buffer-local registration is unreliable. The
+	-- callback checks the buffer itself.
+	api.nvim_create_autocmd("ModeChanged", {
 		group = M._augroup,
 		callback = function()
-			if vim.api.nvim_get_current_buf() == bufnr then send_cursor_sync(bufnr) end
+			if api.nvim_get_current_buf() == bufnr then
+				send_cursor_sync(bufnr)
+			end
 		end,
 		desc = "Live Preview cursor shape sync",
 	})
 end
 
 local function set_follow_autocmd()
-	if M._follow_augroup then
-		pcall(vim.api.nvim_del_augroup_by_id, M._follow_augroup)
-	end
-	M._follow_augroup = vim.api.nvim_create_augroup("MarkdownPreviewFollow", { clear = true })
+	del_augroup("_follow_augroup")
+	M._follow_augroup = api.nvim_create_augroup("MarkdownPreviewFollow", { clear = true })
 
-	vim.api.nvim_create_autocmd("BufEnter", {
+	api.nvim_create_autocmd("BufEnter", {
 		group = M._follow_augroup,
 		callback = function(args)
 			local bufnr = args.buf
 			if bufnr == M._active_bufnr then return end
-			if vim.bo[bufnr].buftype ~= "" then return end   -- skip help, terminals, etc.
+			if vim.bo[bufnr].buftype ~= "" then return end -- skip help, terminals, etc.
 			if content_line_offset(bufnr) == nil then return end -- only markdown / .mmd / .mermaid
+
 			-- Run after the buffer switch settles; start() reads the current buffer.
 			vim.schedule(function()
-				if vim.api.nvim_get_current_buf() == bufnr then
+				if api.nvim_get_current_buf() == bufnr then
 					M.start()
 				end
 			end)
@@ -531,230 +645,205 @@ local function set_follow_autocmd()
 end
 
 ---------------------------------------------------------------------------
--- CDN
+-- CDN mapping
 ---------------------------------------------------------------------------
 
-local function cdn_map(p, ...)
-    local params = {...}
+--- Maps a requested asset name to a CDN URL.
+---   cdn_map("katex.min.css")            -> url
+---   cdn_map("iconify-json", "mdi")      -> url
+local function cdn_map(name, ...)
+	local nargs = select("#", ...)
 
-    if #params == 0 then
-        if "github-dark.min.css" == p then
-            return "https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github-dark.min.css"
-        end
-        if "github.min.css" == p then
-            return "https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github.min.css"
-        end
-        if "katex.min.css" == p then
-            return "https://cdn.jsdelivr.net/npm/katex@0.16.28/dist/katex.min.css"
-        end
-        if "texmath.css" == p then
-            return "https://cdn.jsdelivr.net/npm/markdown-it-texmath@1.0.0/css/texmath.css"
-        end
-        if "markdown-it.min.js" == p then
-            return "https://cdn.jsdelivr.net/npm/markdown-it@14/dist/markdown-it.min.js"
-        end
-        if "morphdom-umd.min.js" == p then
-            return "https://cdn.jsdelivr.net/npm/morphdom@2/dist/morphdom-umd.min.js"
-        end
-        if "highlight.min.js" == p then
-            return "https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/highlight.min.js"
-        end
-        if "markdown-it-emoji.min.js" == p then
-            return "https://cdn.jsdelivr.net/npm/markdown-it-emoji@3.0.0/dist/markdown-it-emoji.min.js"
-        end
-        if "markdown-it-footnote.min.js" == p then
-            return "https://cdn.jsdelivr.net/npm/markdown-it-footnote@4.0.0/dist/markdown-it-footnote.min.js"
-        end
-        if "markdown-it-task-lists.min.js" == p then
-            return "https://cdn.jsdelivr.net/npm/markdown-it-task-lists@2.1.1/dist/markdown-it-task-lists.min.js"
-        end
-        if "katex.min.js" == p then
-            return "https://cdn.jsdelivr.net/npm/katex@0.16.28/dist/katex.min.js"
-        end
-        if "markdownItAnchor.umd.js" == p then
-            return "https://unpkg.com/markdown-it-anchor@9.2.0/dist/markdownItAnchor.umd.js"
-        end
-        if "texmath.js" == p then
-            return "https://cdn.jsdelivr.net/npm/markdown-it-texmath@1.0.0/texmath.js"
-        end
-        if "markdown-it-github-alerts.mjs" == p then
-            return "https://unpkg.com/markdown-it-github-alerts@1.0.1/dist/index.mjs"
-        end
-        if "mermaid.min.js" == p then
-            return "https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.min.js"
-        end
+	if nargs == 0 then
+		return CDN[name]
+	elseif nargs == 1 then
+		if name == "iconify-json" then
+			return ("https://unpkg.com/@iconify-json/%s@1/icons.json"):format((...))
+		end
+		return nil
+	end
 
-    elseif #params == 1 then
-        local p1 = params[1]
-        if "iconify-json" == p then
-            return "https://unpkg.com/@iconify-json/"..p1.."@1/icons.json"
-        end
-    else
-        vim.schedule(function()
-		    vim.notify("Live Preview: no cdn mapping: " .. tostring(p), vim.log.levels.ERROR)
-        end)
-    end
+	vim.schedule(function()
+		notify("no cdn mapping: " .. tostring(name), levels.ERROR)
+	end)
+end
+
+---------------------------------------------------------------------------
+-- Server helpers
+---------------------------------------------------------------------------
+
+--- UDP trick to find the outbound LAN IP.
+local function lan_ip()
+	local udp = uv.new_udp()
+	if not udp then
+		return "127.0.0.1"
+	end
+	local ok = pcall(function()
+		udp:connect("8.8.8.8", 80)
+	end)
+	local addr = ok and udp:getsockname()
+	pcall(function()
+		udp:close()
+	end)
+	return (addr and addr.ip) or "127.0.0.1"
+end
+
+--- URL the browser opens. Embeds the auth token when one exists.
+local function browser_url(port)
+	local host = (M.config.host == "0.0.0.0") and lan_ip() or M.config.host
+	local url = ("http://%s:%d/"):format(host, port)
+	if M._token and M._token ~= "" then
+		url = url .. "?t=" .. M._token
+	end
+	return url
+end
+
+local function open_browser_soon(port)
+	vim.defer_fn(function()
+		util.open_in_browser(browser_url(port))
+	end, 200)
+end
+
+--- Paths the server must not serve as user assets.
+local function protected_paths()
+	return {
+		"^/" .. vim.pesc(CONTENT_NAME) .. "$",
+		"^/" .. vim.pesc(ASSET_ROOT_NAME) .. "$",
+		"^/$",
+		"^/" .. vim.pesc(INDEX_NAME) .. "$",
+	}
+end
+
+--- Directory of the previewed buffer's source file, or nil.
+local function current_asset_root()
+	local dir = M._workspace_dir
+	if not dir then
+		return nil
+	end
+	local ok, data = pcall(file.read_text, vim.fs.joinpath(dir, ASSET_ROOT_NAME))
+	if not ok or not data or data == "" then
+		return nil
+	end
+	return (data:gsub("%s+$", ""))
+end
+
+---@return boolean started
+local function start_server(shared_dir, dir)
+	local ok, inst = pcall(ls_server.start, {
+		host = M.config.host,
+		roots = { shared_dir, dir },
+		headers = { ["cache-control"] = "no-cache" },
+		-- The browser sends {type="hello"} when its websocket opens; reply
+		-- with the current cursor so a fresh/reconnected tab is in sync.
+		on_message = on_browser_message,
+		token = M._token,
+		protected_paths = protected_paths(),
+		asset_root = current_asset_root,
+		extra_asset_roots = M.config.extra_asset_roots,
+		cdn_map = cdn_map,
+		cdn_root = vim.fs.joinpath(shared_dir, "cdn"),
+	})
+	if not ok then
+		notify(("failed to start server %s"):format(tostring(inst)), levels.ERROR)
+		return false
+	end
+
+	M._server_instance = inst
+	notify(("runs on %s"):format(browser_url(inst.port)))
+
+	if M.config.open_browser then
+		open_browser_soon(inst.port)
+	end
+	return true
+end
+
+--- Server already running: point it at the current buffer's workspace.
+local function retarget_server(shared_dir, dir, tick)
+	local inst = M._server_instance
+	pcall(ls_server.update_target, inst, { shared_dir, dir })
+	pcall(ls_server.reload, inst, CONTENT_NAME, tick)
+
+	-- No browser tab connected: reopen.
+	if M.config.open_browser and ls_server.connected_client_count(inst) == 0 then
+		open_browser_soon(inst.port)
+	end
 end
 
 ---------------------------------------------------------------------------
 -- Public API
 ---------------------------------------------------------------------------
 
--- When bound to 0.0.0.0 detect the outbound LAN IP via a UDP connect trick
--- (no packets are sent; it just lets the kernel pick the right interface).
-local function lan_ip()
-	local udp = vim.loop.new_udp()
-	if not udp then return "127.0.0.1" end
-	local ok = pcall(function() udp:connect("8.8.8.8", 80) end)
-	local addr = ok and udp:getsockname()
-	pcall(function() udp:close() end)
-	return (addr and addr.ip) or "127.0.0.1"
-end
-
-
--- Build the URL the browser opens to. Embeds the auth token when one exists
--- so the first request includes it (the page then stashes it in
--- sessionStorage for refreshes).
-local function browser_url(port)
-	local display_host = (M.config.host == "0.0.0.0") and lan_ip() or M.config.host
-	local base = ("http://%s:%d/"):format(display_host, port)
-    local url = M._token and M._token ~= "" and base .. "?t=" .. M._token or base
-	return url
-end
-
 function M.start()
-	local bufnr = vim.api.nvim_get_current_buf()
-	M._active_bufnr = bufnr
-	M._last_cursor = nil -- force the first cursor message after (re)start
-    local tick = vim.api.nvim_buf_get_changedtick(bufnr)
+	local bufnr = api.nvim_get_current_buf()
+	local tick = api.nvim_buf_get_changedtick(bufnr)
 
 	local ok_content, text = pcall(get_content, bufnr)
 	if not ok_content then
-		vim.notify("Live Preview: " .. tostring(text), vim.log.levels.ERROR)
+		notify(tostring(text), levels.ERROR)
 		return
 	end
 
-    -- Ensure workspace
+	M._active_bufnr = bufnr
+	M._last_cursor = nil -- force the first cursor message after (re)start
+
 	local dir = ensure_workspace(bufnr)
 	M._workspace_dir = dir
+	local shared_dir = util.shared_workspace()
 
-    local shared_dir = util.shared_workspace()
-
-	-- One token per server lifetime, reused across retargets. Must exist
-    -- before writing index.html because it is baked in via __LIVE_TOKEN__.
 	if not M._token or M._token == "" then
 		M._token = ls_util.random_token(16)
 	end
 
-    -- Shared content. It overwrites old ones.
-    write_js(shared_dir)
+	-- Shared content (overwrites old copies).
+	write_js(shared_dir)
 	write_index(shared_dir)
 
+	-- Per-buffer content.
 	write_content(dir, text, bufnr)
 	M._last_text_by_buf[bufnr] = text
-    M._written_tick[bufnr] = tick
+	M._written_tick[bufnr] = tick
 
 	set_autocmds_for_buffer(bufnr)
-    set_follow_autocmd()
+	set_follow_autocmd()
 
-    local protected = {
-        "^/" .. vim.pesc(content_name) .. "$",
-        "^/asset_root$",
-        "^/$",
-        "^/" .. vim.pesc(index_name) .. "$",
-    }
-
-	if not M._server_instance then
-		local ok, inst = pcall(ls_server.start, {
-			host = M.config.host,
-            -- Makesure shared_workspace is first because index.html serves
-            -- from here. The HTTP sersver supports multiple workspaces but
-            -- only resolve / to index.html for the first workspace.
-			roots = { shared_dir, dir },
-			headers = { ["cache-control"] = "no-cache" },
-			-- The browser sends {type="hello"} when its websocket opens; reply
-			-- with the current cursor so a fresh/reconnected tab is in sync.
-			on_message = on_browser_message,
-			token = M._token,
-			protected_paths = protected,
-            -- Resolve relative image paths against the source file's dir. Read
-            -- per request so buffer switches retarget it via the sidecar.
-			asset_root = function()
-				local ws = M._workspace_dir
-				if not ws then return nil end
-				local ok_read, data = pcall(file.read_text, vim.fs.joinpath(ws, "asset_root"))
-				if not ok_read or not data or data == "" then return nil end
-				return (data:gsub("%s+$", ""))
-			end,
-			extra_asset_roots = M.config.extra_asset_roots,
-            cdn_map = cdn_map,
-            cdn_root = vim.fs.joinpath(shared_dir, "cdn")
-		})
-		if not ok then
-			vim.notify(
-				("Live Preview: failed to start server %s"):format(tostring(inst)),
-				vim.log.levels.ERROR
-			)
-			return
-        end
-
-        vim.notify(
-            ("Live Preview: runs on %s"):format(browser_url(inst.port)),
-            vim.log.levels.INFO
-        )
-
-        M._server_instance = inst
-
-		if M.config.open_browser then
-			vim.defer_fn(function()
-				util.open_in_browser(browser_url(inst.port))
-			end, 200)
-		end
-	else
-		-- Server already running in this nvim: retarget to this buffer's workspace
-		pcall(ls_server.update_target, M._server_instance, { shared_dir, dir })
-		pcall(ls_server.reload, M._server_instance, content_name, tick)
-
-		-- No browser tab connected: reopen.
-		if M.config.open_browser and ls_server.connected_client_count(M._server_instance) == 0 then
-			vim.defer_fn(function()
-				util.open_in_browser(browser_url(M._server_instance.port))
-			end, 200)
-		end
+	if M._server_instance then
+		retarget_server(shared_dir, dir, tick)
+	elseif not start_server(shared_dir, dir) then
+		return
 	end
 
 	-- Push an initial cursor position. The browser may not have its websocket
 	-- open yet; the "hello" handshake (see on_browser_message) covers that case.
-	vim.defer_fn(function() send_cursor_sync(bufnr, true) end, 500)
+	vim.defer_fn(function()
+		send_cursor_sync(bufnr, true)
+	end, 500)
 end
 
 function M.refresh()
-	local bufnr = vim.api.nvim_get_current_buf()
-	local changed = maybe_refresh(bufnr)
+	local changed = maybe_refresh(api.nvim_get_current_buf())
 	if not changed and M.config.notify_on_refresh then
-		vim.notify("Live Preview: no changes detected", vim.log.levels.INFO)
+		notify("no changes detected")
 	end
 end
 
 function M.stop()
-	if M._augroup then
-		pcall(vim.api.nvim_del_augroup_by_id, M._augroup)
-		M._augroup = nil
-	end
+	del_augroup("_augroup")
+	del_augroup("_follow_augroup")
+
 	if M._server_instance then
 		pcall(ls_server.stop, M._server_instance)
 		M._server_instance = nil
 	end
-	if M._follow_augroup then
-		pcall(vim.api.nvim_del_augroup_by_id, M._follow_augroup)
-		M._follow_augroup = nil
+
+	if M._refresh_timer then
+		M._refresh_timer:stop()
+		M._refresh_timer:close()
+		M._refresh_timer = nil
 	end
-    if M._refresh_timer then
-        M._refresh_timer:stop()
-        M._refresh_timer:close()
-        M._refresh_timer = nil
-    end
-    M._written_tick = {}
+
+	M._active_bufnr = nil
+	M._last_text_by_buf = {}
+	M._written_tick = {}
 	M._workspace_dir = nil
 	M._last_cursor = nil
 	M._token = nil
